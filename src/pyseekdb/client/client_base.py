@@ -1991,10 +1991,13 @@ class BaseClient(BaseConnection, AdminAPI):
         
         # Handle $contains - use query_string
         if "$contains" in where_document:
+            # Use pymysql's escape_string for safe escaping of query content
+            query_content = where_document["$contains"]
+            escaped_query = escape_string(query_content)
             return {
                 "query_string": {
                     "fields": ["document"],
-                    "query": where_document["$contains"]
+                    "query": escaped_query
                 }
             }
         
@@ -2007,11 +2010,12 @@ class BaseClient(BaseConnection, AdminAPI):
                     contains_queries.append(condition["$contains"])
             
             if contains_queries:
-                # Combine multiple $contains with AND
+                # Combine multiple $contains with AND (escape each query)
+                escaped_queries = [escape_string(q) for q in contains_queries]
                 return {
                     "query_string": {
                         "fields": ["document"],
-                        "query": " ".join(contains_queries)
+                        "query": " ".join(escaped_queries)
                     }
                 }
         
@@ -2024,11 +2028,12 @@ class BaseClient(BaseConnection, AdminAPI):
                     contains_queries.append(condition["$contains"])
             
             if contains_queries:
-                # Combine multiple $contains with OR
+                # Combine multiple $contains with OR (escape each query)
+                escaped_queries = [escape_string(q) for q in contains_queries]
                 return {
                     "query_string": {
                         "fields": ["document"],
-                        "query": " OR ".join(contains_queries)
+                        "query": " OR ".join(escaped_queries)
                     }
                 }
         

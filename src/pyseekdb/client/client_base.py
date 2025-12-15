@@ -7,6 +7,7 @@ import re
 from abc import ABC, abstractmethod
 from typing import List, Optional, Sequence, Dict, Any, Union, TYPE_CHECKING, Tuple, Callable
 from dataclasses import dataclass
+from pymysql.converters import escape_string
 
 from .base_connection import BaseConnection
 from .admin_client import AdminAPI, DEFAULT_TENANT
@@ -685,8 +686,8 @@ class BaseClient(BaseConnection, AdminAPI):
             # Process document
             doc_val = documents[i] if documents else None
             if doc_val is not None:
-                # Escape single quotes
-                doc_val_escaped = doc_val.replace("'", "''")
+                # Use pymysql's escape_string for safe escaping
+                doc_val_escaped = escape_string(doc_val)
                 doc_sql = f"'{doc_val_escaped}'"
             else:
                 doc_sql = "NULL"
@@ -694,9 +695,9 @@ class BaseClient(BaseConnection, AdminAPI):
             # Process metadata
             meta_val = metadatas[i] if metadatas else None
             if meta_val is not None:
-                # Convert to JSON string and escape
+                # Convert to JSON string and escape using pymysql's escape_string
                 meta_json = json.dumps(meta_val, ensure_ascii=False)
-                meta_json_escaped = meta_json.replace("'", "''")
+                meta_json_escaped = escape_string(meta_json)
                 meta_sql = f"'{meta_json_escaped}'"
             else:
                 meta_sql = "NULL"
@@ -828,14 +829,14 @@ class BaseClient(BaseConnection, AdminAPI):
             if documents:
                 doc_val = documents[i]
                 if doc_val is not None:
-                    doc_val_escaped = doc_val.replace("'", "''")
+                    doc_val_escaped = escape_string(doc_val)
                     set_clauses.append(f"{CollectionFieldNames.DOCUMENT} = '{doc_val_escaped}'")
             
             if metadatas:
                 meta_val = metadatas[i]
                 if meta_val is not None:
                     meta_json = json.dumps(meta_val, ensure_ascii=False)
-                    meta_json_escaped = meta_json.replace("'", "''")
+                    meta_json_escaped = escape_string(meta_json)
                     set_clauses.append(f"{CollectionFieldNames.METADATA} = '{meta_json_escaped}'")
             
             if embeddings:
@@ -985,12 +986,12 @@ class BaseClient(BaseConnection, AdminAPI):
                 set_clauses = []
                 
                 if doc_val is not None:
-                    doc_val_escaped = final_document.replace("'", "''") if final_document else "NULL"
+                    doc_val_escaped = escape_string(final_document) if final_document else "NULL"
                     set_clauses.append(f"{CollectionFieldNames.DOCUMENT} = '{doc_val_escaped}'")
                 
                 if meta_val is not None:
                     meta_json = json.dumps(final_metadata, ensure_ascii=False) if final_metadata else "{}"
-                    meta_json_escaped = meta_json.replace("'", "''")
+                    meta_json_escaped = escape_string(meta_json)
                     set_clauses.append(f"{CollectionFieldNames.METADATA} = '{meta_json_escaped}'")
                 
                 if vec_val is not None:
@@ -1004,14 +1005,14 @@ class BaseClient(BaseConnection, AdminAPI):
             else:
                 # Insert new record
                 if doc_val:
-                    doc_val_escaped = doc_val.replace("'", "''")
+                    doc_val_escaped = escape_string(doc_val)
                     doc_sql = f"'{doc_val_escaped}'"
                 else:
                     doc_sql = "NULL"
                 
                 if meta_val is not None:
                     meta_json = json.dumps(meta_val, ensure_ascii=False)
-                    meta_json_escaped = meta_json.replace("'", "''")
+                    meta_json_escaped = escape_string(meta_json)
                     meta_sql = f"'{meta_json_escaped}'"
                 else:
                     meta_sql = "NULL"
@@ -1337,8 +1338,8 @@ class BaseClient(BaseConnection, AdminAPI):
         if not isinstance(id_val, str):
             id_val = str(id_val)
         
-        # Escape single quotes in the ID
-        id_val_escaped = id_val.replace("'", "''")
+        # Use pymysql's escape_string for safe escaping
+        id_val_escaped = escape_string(id_val)
         # Use CAST to convert string to binary for varbinary(512) field
         return f"CAST('{id_val_escaped}' AS BINARY)"
     
@@ -1836,8 +1837,8 @@ class BaseClient(BaseConnection, AdminAPI):
         # Use variable binding to avoid datatype issues
         use_context_manager = self._use_context_manager_for_cursor()
         
-        # Set the search_parm variable first
-        escaped_params = search_parm_json.replace("'", "''")
+        # Set the search_parm variable first (use safe escaping)
+        escaped_params = escape_string(search_parm_json)
         set_sql = f"SET @search_parm = '{escaped_params}'"
         logger.debug(f"Setting search_parm: {set_sql}")
         logger.debug(f"Search parm JSON: {search_parm_json}")

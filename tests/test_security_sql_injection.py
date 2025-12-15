@@ -50,108 +50,6 @@ OB_PASSWORD = os.environ.get('OB_PASSWORD', '')
 class TestSecuritySQLInjection:
     """Security test class for SQL injection prevention"""
     
-    @pytest.fixture(params=['embedded', 'server', 'oceanbase'])
-    def client_mode(self, request):
-        """Parametrized fixture for different client modes"""
-        return request.param
-    
-    @pytest.fixture
-    def client_and_admin(self, client_mode):
-        """Create client and admin based on mode"""
-        if client_mode == 'embedded':
-            # Use temporary directory for embedded mode
-            temp_dir = tempfile.mkdtemp(prefix="pyseekdb_security_test_")
-            admin = pyseekdb.AdminClient(path=temp_dir)
-            
-            # Create database
-            try:
-                admin.create_database(SEEKDB_DATABASE)
-            except:
-                pass  # Database might already exist
-                
-            client = pyseekdb.Client(path=temp_dir, database=SEEKDB_DATABASE)
-            
-            yield client, admin, temp_dir
-            
-            # Cleanup
-            try:
-                shutil.rmtree(temp_dir)
-            except:
-                pass
-                
-        elif client_mode == 'server':
-            admin = pyseekdb.AdminClient(
-                host=SERVER_HOST,
-                port=SERVER_PORT,
-                user=SERVER_USER,
-                password=SERVER_PASSWORD
-            )
-            
-            # Create database
-            try:
-                admin.create_database(SERVER_DATABASE)
-            except:
-                pass  # Database might already exist
-                
-            client = pyseekdb.Client(
-                host=SERVER_HOST,
-                port=SERVER_PORT,
-                database=SERVER_DATABASE,
-                user=SERVER_USER,
-                password=SERVER_PASSWORD
-            )
-            
-            yield client, admin, None
-            
-        elif client_mode == 'oceanbase':
-            admin = pyseekdb.AdminClient(
-                host=OB_HOST,
-                port=OB_PORT,
-                tenant=OB_TENANT,
-                user=OB_USER,
-                password=OB_PASSWORD
-            )
-            
-            # Create database
-            try:
-                admin.create_database(OB_DATABASE)
-            except:
-                pass  # Database might already exist
-                
-            client = pyseekdb.Client(
-                host=OB_HOST,
-                port=OB_PORT,
-                tenant=OB_TENANT,
-                database=OB_DATABASE,
-                user=OB_USER,
-                password=OB_PASSWORD
-            )
-            
-            yield client, admin, None
-    
-    @pytest.fixture
-    def collection(self, client_and_admin):
-        """Create a test collection"""
-        client, admin, temp_dir = client_and_admin
-        collection_name = "security_test_collection"
-        
-        # Clean up existing collection
-        try:
-            client.delete_collection(collection_name)
-        except:
-            pass
-        
-        # Create new collection
-        collection = client.create_collection(name=collection_name)
-        
-        yield collection
-        
-        # Cleanup
-        try:
-            client.delete_collection(collection_name)
-        except:
-            pass
-    
     def get_security_test_cases(self) -> List[Dict[str, Any]]:
         """Get test cases with various security attack vectors"""
         return [
@@ -215,7 +113,52 @@ class TestSecuritySQLInjection:
         except Exception:
             return False
     
-    def test_add_operation_security(self, collection):
+    def run_security_tests(self, client, admin, temp_dir=None):
+        """Run all security tests for a given client"""
+        # Test each operation separately with its own collection to avoid ID conflicts
+        
+        # Test 1: ADD operation
+        self._run_single_test(client, "add_test", self._test_add_operation_security)
+        
+        # Test 2: UPDATE operation  
+        self._run_single_test(client, "update_test", self._test_update_operation_security)
+        
+        # Test 3: UPSERT operation
+        self._run_single_test(client, "upsert_test", self._test_upsert_operation_security)
+        
+        # Test 4: QUERY operation
+        self._run_single_test(client, "query_test", self._test_query_operation_security)
+        
+        # Test 5: GET operation
+        self._run_single_test(client, "get_test", self._test_get_operation_security)
+        
+        # Test 6: Comprehensive workflow
+        self._run_single_test(client, "comprehensive_test", self._test_comprehensive_security_workflow)
+    
+    def _run_single_test(self, client, test_name, test_method):
+        """Run a single test with its own collection"""
+        collection_name = f"security_{test_name}_collection"
+        
+        # Clean up existing collection
+        try:
+            client.delete_collection(collection_name)
+        except:
+            pass
+        
+        # Create new collection
+        collection = client.create_collection(name=collection_name)
+        
+        try:
+            # Run the test method
+            test_method(collection)
+        finally:
+            # Cleanup
+            try:
+                client.delete_collection(collection_name)
+            except:
+                pass
+    
+    def _test_add_operation_security(self, collection):
         """Test ADD operation with security attack vectors"""
         test_cases = self.get_security_test_cases()
         
@@ -231,7 +174,7 @@ class TestSecuritySQLInjection:
             assert self.verify_data_integrity(collection, test_case), \
                 f"Data integrity failed for ADD operation: {test_case['description']}"
     
-    def test_update_operation_security(self, collection):
+    def _test_update_operation_security(self, collection):
         """Test UPDATE operation with security attack vectors"""
         test_cases = self.get_security_test_cases()
         
@@ -264,7 +207,7 @@ class TestSecuritySQLInjection:
             assert self.verify_data_integrity(collection, updated_test_case), \
                 f"Data integrity failed for UPDATE operation: {test_case['description']}"
     
-    def test_upsert_operation_security(self, collection):
+    def _test_upsert_operation_security(self, collection):
         """Test UPSERT operation with security attack vectors"""
         test_cases = self.get_security_test_cases()
         
@@ -300,7 +243,7 @@ class TestSecuritySQLInjection:
             assert self.verify_data_integrity(collection, upserted_test_case), \
                 f"Data integrity failed for UPSERT (existing) operation: {test_case['description']}"
     
-    def test_query_operation_security(self, collection):
+    def _test_query_operation_security(self, collection):
         """Test QUERY operation with security attack vectors"""
         test_cases = self.get_security_test_cases()
         
@@ -338,7 +281,7 @@ class TestSecuritySQLInjection:
             except Exception as e:
                 pytest.fail(f"Query operation failed with security payload '{query_test['text']}': {e}")
     
-    def test_get_operation_security(self, collection):
+    def _test_get_operation_security(self, collection):
         """Test GET operation with security attack vectors in IDs"""
         # Test with special character IDs
         special_ids = [
@@ -371,7 +314,7 @@ class TestSecuritySQLInjection:
             except Exception as e:
                 pytest.fail(f"GET operation failed with special ID '{special_id}': {e}")
     
-    def test_comprehensive_security_workflow(self, collection):
+    def _test_comprehensive_security_workflow(self, collection):
         """Test a comprehensive workflow with all operations and security payloads"""
         # This is a comprehensive test that combines all operations
         test_case = {
@@ -422,20 +365,105 @@ class TestSecuritySQLInjection:
         assert result is not None
         assert len(result["ids"]) > 0
 
+    # ==================== Mode-specific Test Methods ====================
+    
+    def test_embedded_security_sql_injection(self):
+        """Run security tests in embedded mode"""
+        # Use temporary directory for embedded mode
+        temp_dir = tempfile.mkdtemp(prefix="pyseekdb_security_test_")
+        
+        try:
+            admin = pyseekdb.AdminClient(path=temp_dir)
+            
+            # Create database
+            try:
+                admin.create_database(SEEKDB_DATABASE)
+            except:
+                pass  # Database might already exist
+                
+            client = pyseekdb.Client(path=temp_dir, database=SEEKDB_DATABASE)
+            
+            # Run all security tests
+            self.run_security_tests(client, admin, temp_dir)
+            
+        finally:
+            # Cleanup
+            try:
+                shutil.rmtree(temp_dir)
+            except:
+                pass
+    
+    def test_server_security_sql_injection(self):
+        """Run security tests in server mode"""
+        admin = pyseekdb.AdminClient(
+            host=SERVER_HOST,
+            port=SERVER_PORT,
+            user=SERVER_USER,
+            password=SERVER_PASSWORD
+        )
+        
+        # Create database
+        try:
+            admin.create_database(SERVER_DATABASE)
+        except:
+            pass  # Database might already exist
+            
+        client = pyseekdb.Client(
+            host=SERVER_HOST,
+            port=SERVER_PORT,
+            database=SERVER_DATABASE,
+            user=SERVER_USER,
+            password=SERVER_PASSWORD
+        )
+        
+        # Run all security tests
+        self.run_security_tests(client, admin)
+    
+    def test_oceanbase_security_sql_injection(self):
+        """Run security tests in oceanbase mode"""
+        admin = pyseekdb.AdminClient(
+            host=OB_HOST,
+            port=OB_PORT,
+            tenant=OB_TENANT,
+            user=OB_USER,
+            password=OB_PASSWORD
+        )
+        
+        # Create database
+        try:
+            admin.create_database(OB_DATABASE)
+        except:
+            pass  # Database might already exist
+            
+        client = pyseekdb.Client(
+            host=OB_HOST,
+            port=OB_PORT,
+            tenant=OB_TENANT,
+            database=OB_DATABASE,
+            user=OB_USER,
+            password=OB_PASSWORD
+        )
+        
+        # Run all security tests
+        self.run_security_tests(client, admin)
 
-# ==================== Test Selection by Environment ====================
+
+# ==================== Standalone Test Functions ====================
 
 def test_embedded():
-    """Run security tests in embedded mode"""
-    pytest.main([__file__ + "::TestSecuritySQLInjection", "-k", "embedded", "-v"])
+    """Run embedded security tests - called by CI with -k 'test_embedded'"""
+    test_instance = TestSecuritySQLInjection()
+    test_instance.test_embedded_security_sql_injection()
 
 def test_server():
-    """Run security tests in server mode"""
-    pytest.main([__file__ + "::TestSecuritySQLInjection", "-k", "server", "-v"])
+    """Run server security tests - called by CI with -k 'test_server'"""
+    test_instance = TestSecuritySQLInjection()
+    test_instance.test_server_security_sql_injection()
 
 def test_oceanbase():
-    """Run security tests in oceanbase mode"""
-    pytest.main([__file__ + "::TestSecuritySQLInjection", "-k", "oceanbase", "-v"])
+    """Run oceanbase security tests - called by CI with -k 'test_oceanbase'"""
+    test_instance = TestSecuritySQLInjection()
+    test_instance.test_oceanbase_security_sql_injection()
 
 
 if __name__ == "__main__":

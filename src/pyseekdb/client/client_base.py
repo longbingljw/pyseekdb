@@ -1069,8 +1069,11 @@ class BaseClient(BaseConnection, AdminAPI):
                 set_clauses = []
                 
                 if doc_val is not None:
-                    doc_val_escaped = escape_string(final_document) if final_document else "NULL"
-                    set_clauses.append(f"{CollectionFieldNames.DOCUMENT} = '{doc_val_escaped}'")
+                    if final_document is not None:
+                        doc_val_escaped = escape_string(final_document)
+                        set_clauses.append(f"{CollectionFieldNames.DOCUMENT} = '{doc_val_escaped}'")
+                    else:
+                        set_clauses.append(f"{CollectionFieldNames.DOCUMENT} = NULL")
                 
                 if meta_val is not None:
                     meta_json = json.dumps(final_metadata, ensure_ascii=False) if final_metadata else "{}"
@@ -1078,8 +1081,11 @@ class BaseClient(BaseConnection, AdminAPI):
                     set_clauses.append(f"{CollectionFieldNames.METADATA} = '{meta_json_escaped}'")
                 
                 if vec_val is not None:
-                    vec_str = "[" + ",".join(map(str, final_vector)) + "]" if final_vector else "NULL"
-                    set_clauses.append(f"{CollectionFieldNames.EMBEDDING} = '{vec_str}'")
+                    if final_vector is not None:
+                        vec_str = "[" + ",".join(map(str, final_vector)) + "]"
+                        set_clauses.append(f"{CollectionFieldNames.EMBEDDING} = '{vec_str}'")
+                    else:
+                        set_clauses.append(f"{CollectionFieldNames.EMBEDDING} = NULL")
                 
                 if set_clauses:
                     sql = f"UPDATE `{table_name}` SET {', '.join(set_clauses)} WHERE {CollectionFieldNames.ID} = {id_sql}"
@@ -1087,7 +1093,7 @@ class BaseClient(BaseConnection, AdminAPI):
                     self._execute(sql)
             else:
                 # Insert new record
-                if doc_val:
+                if doc_val is not None:
                     doc_val_escaped = escape_string(doc_val)
                     doc_sql = f"'{doc_val_escaped}'"
                 else:

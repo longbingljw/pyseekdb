@@ -13,6 +13,14 @@ from .base_connection import BaseConnection
 from .admin_client import AdminAPI, DEFAULT_TENANT
 from .meta_info import CollectionNames, CollectionFieldNames
 from .filters import FilterBuilder
+from .configuration import (
+    HNSWConfiguration,
+    Configuration,
+    ConfigurationParam,
+    FulltextParserConfig,
+    DEFAULT_VECTOR_DIMENSION,
+    DEFAULT_DISTANCE_METRIC
+)
 from .embedding_function import (
     EmbeddingFunction,
     DefaultEmbeddingFunction,
@@ -25,13 +33,10 @@ from .collection import Collection
 
 from .database import Database
 
-logger = logging.getLogger(__name__)
+# Type alias for embedding_function parameter that can be EmbeddingFunction, None, or sentinel
+EmbeddingFunctionParam = Union[EmbeddingFunction[EmbeddingDocuments], None, Any]
 
-# Default configuration constants
-# Note: Default embedding function (DefaultEmbeddingFunction) produces 384-dim embeddings
-# So we use 384 as the default dimension to match
-DEFAULT_VECTOR_DIMENSION = 384  # Matches DefaultEmbeddingFunction dimension
-DEFAULT_DISTANCE_METRIC = 'cosine'
+logger = logging.getLogger(__name__)
 
 # Sentinel object to distinguish between "parameter not provided" and "explicitly set to None"
 class _NotProvided:
@@ -40,30 +45,72 @@ class _NotProvided:
 
 _NOT_PROVIDED = _NotProvided()
 
-# Type alias for embedding_function parameter that can be EmbeddingFunction, None, or sentinel
-EmbeddingFunctionParam = Union[EmbeddingFunction[EmbeddingDocuments], None, Any]
+
+def _extract_hnsw_config(config: ConfigurationParam) -> Optional[HNSWConfiguration]:
+    if config is None:
+        return None
+    elif isinstance(config, HNSWConfiguration):
+        return config
+    elif isinstance(config, Configuration):
+        return config.hnsw
+    else:
+        raise TypeError(
+            f"configuration must be Configuration, HNSWConfiguration, or None, "
+            f"got {type(config)}"
+        )
 
 
-@dataclass
-class HNSWConfiguration:
+def _extract_fulltext_config(config: ConfigurationParam) -> Optional[FulltextParserConfig]:
+    if config is None:
+        return None
+    elif isinstance(config, HNSWConfiguration):
+        # HNSWConfiguration doesn't have fulltext config, return None (will use default)
+        return None
+    elif isinstance(config, Configuration):
+        # If Configuration has fulltext_config, return it; otherwise return None (will use default)
+        return config.fulltext_config
+    else:
+        # Should not reach here due to type checking, but handle gracefully
+        return None
+
+
+def _get_fulltext_index_sql(fulltext_config: Optional[FulltextParserConfig] = None) -> str:
     """
-    HNSW (Hierarchical Navigable Small World) index configuration
-    
+    Generate FULLTEXT INDEX SQL clause from fulltext configuration.
+
     Args:
-        dimension: Vector dimension (number of elements in each vector)
-        distance: Distance metric for similarity calculation (e.g., 'l2', 'cosine', 'inner_product')
-    """
-    dimension: int
-    distance: str = 'l2'
-    
-    def __post_init__(self):
-        if self.dimension <= 0:
-            raise ValueError(f"dimension must be positive, got {self.dimension}")
-        if self.distance not in ['l2', 'cosine', 'inner_product']:
-            raise ValueError(f"distance must be one of ['l2', 'cosine', 'inner_product'], got {self.distance}")
+        fulltext_config: FulltextParserConfig or None. If None, defaults to IK parser.
 
-# Type alias for configuration parameter that can be HNSWConfiguration, None, or sentinel
-ConfigurationParam = Union[HNSWConfiguration, None, Any]
+    Returns:
+        SQL clause string for FULLTEXT INDEX (e.g., "WITH PARSER ik" or "WITH PARSER ngram PARSER_PROPERTIES=(size=2)")
+    """
+    if fulltext_config is None:
+        # Default to IK parser for backward compatibility
+        return "WITH PARSER ik"
+
+    parser_name = fulltext_config.parser
+    params = fulltext_config.params or {}
+
+    # Build SQL clause with parser name
+    if params:
+        # Format parameters as key=value pairs
+        # Quote string values, leave numbers and booleans as-is
+        param_parts = []
+        for k, v in params.items():
+            if isinstance(v, str):
+                param_parts.append(f"{k}='{v}'")
+            else:
+                param_parts.append(f"{k}={v}")
+        param_str = ', '.join(param_parts)
+        return f"WITH PARSER {parser_name} PARSER_PROPERTIES=({param_str})"
+    else:
+        return f"WITH PARSER {parser_name}"
+
+def _get_vector_index_sql(hnsw_config: HNSWConfiguration) -> str:
+    """
+    Generate VECTOR INDEX SQL clause from HNSWConfiguration.
+    """
+    return f"WITH (DISTANCE={hnsw_config.distance}, TYPE=hnsw, LIB=vsag)"
 
 class ClientAPI(ABC):
     """
@@ -84,7 +131,9 @@ class ClientAPI(ABC):
         
         Args:
             name: Collection name
-            configuration: HNSW index configuration (HNSWConfiguration)
+            configuration: Index configuration (Configuration or HNSWConfiguration).
+                          For backward compatibility, HNSWConfiguration is still accepted.
+                          Configuration can include fulltext parser configuration (FulltextParserConfig).
             embedding_function: Embedding function to convert documents to embeddings.
                                Defaults to DefaultEmbeddingFunction.
                                If explicitly set to None, collection will not have an embedding function.
@@ -145,7 +194,7 @@ class BaseClient(BaseConnection, AdminAPI):
     """
     
     # ==================== Collection Management (User-facing) ====================
-    
+
     def create_collection(
         self,
         name: str,
@@ -155,13 +204,15 @@ class BaseClient(BaseConnection, AdminAPI):
     ) -> "Collection":
         """
         Create a collection (user-facing API)
-        
+
         Args:
             name: Collection name
-            configuration: HNSW index configuration (HNSWConfiguration)
-                          If not provided, uses default configuration (dimension=384, distance='cosine').
+            configuration: Index configuration (Configuration or HNSWConfiguration).
+                          If not provided, uses default configuration (dimension=384, distance='cosine', parser='ik').
                           If explicitly set to None, will try to calculate dimension from embedding_function.
                           If embedding_function is also None, will raise an error.
+                          For backward compatibility, HNSWConfiguration is still accepted.
+                          Configuration can include fulltext parser configuration (FulltextParserConfig with parser='ik', 'space', 'ngram', 'ngram2', or 'beng').
             embedding_function: Embedding function to convert documents to embeddings.
                                Defaults to DefaultEmbeddingFunction.
                                If explicitly set to None, collection will not have an embedding function.
@@ -169,20 +220,21 @@ class BaseClient(BaseConnection, AdminAPI):
                                embedding_function.__call__("seekdb"), and this dimension will be used
                                to create the table. If configuration.dimension is set and doesn't match
                                the calculated dimension, a ValueError will be raised.
-            **kwargs: Additional parameters 
-            
+            **kwargs: Additional parameters
+
         Returns:
             Collection object
-            
+
         Raises:
             ValueError: If configuration is explicitly set to None and embedding_function is also None
                        (cannot determine dimension), or if embedding_function is provided and
                        configuration.dimension doesn't match the calculated dimension from embedding_function
-            
+            TypeError: If configuration is not None, Configuration, or HNSWConfiguration
+
         Examples:
-            # Using default configuration and default embedding function
+            # Using default configuration and default embedding function (defaults to IK parser)
             >>> collection = client.create_collection('my_collection')
-            
+
             # Using custom embedding function (dimension will be calculated automatically)
             >>> from pyseekdb import DefaultEmbeddingFunction
             >>> ef = DefaultEmbeddingFunction(model_name='all-MiniLM-L6-v2')
@@ -192,10 +244,32 @@ class BaseClient(BaseConnection, AdminAPI):
             ...     configuration=config,
             ...     embedding_function=ef
             ... )
-            
+
+            # Using Configuration wrapper with IK parser (default)
+            >>> from pyseekdb import Configuration, HNSWConfiguration, FulltextParserConfig
+            >>> config = Configuration(
+            ...     hnsw=HNSWConfiguration(dimension=384, distance='cosine'),
+            ...     fulltext_config=FulltextParserConfig(parser='ik')
+            ... )
+            >>> collection = client.create_collection('my_collection', configuration=config, embedding_function=ef)
+
+            # Using Space parser
+            >>> config = Configuration(
+            ...     hnsw=HNSWConfiguration(dimension=384, distance='cosine'),
+            ...     fulltext_config=FulltextParserConfig(parser='space')
+            ... )
+            >>> collection = client.create_collection('my_collection', configuration=config, embedding_function=ef)
+
+            # Using Ngram parser with parameters
+            >>> config = Configuration(
+            ...     hnsw=HNSWConfiguration(dimension=384, distance='cosine'),
+            ...     fulltext_config=FulltextParserConfig(parser='ngram', params={'size': 2})
+            ... )
+            >>> collection = client.create_collection('my_collection', configuration=config, embedding_function=ef)
+
             # Explicitly set configuration=None, use embedding function to determine dimension
             >>> collection = client.create_collection('my_collection', configuration=None, embedding_function=ef)
-            
+
             # Explicitly disable embedding function (use configuration dimension)
             >>> config = HNSWConfiguration(dimension=128, distance='cosine')
             >>> collection = client.create_collection('my_collection', configuration=config, embedding_function=None)
@@ -204,7 +278,7 @@ class BaseClient(BaseConnection, AdminAPI):
         # If not provided (sentinel), use default embedding function
         if embedding_function is _NOT_PROVIDED:
             embedding_function = get_default_embedding_function()
-        
+
         # Calculate actual dimension from embedding function if provided
         actual_dimension = None
         if embedding_function is not None:
@@ -228,15 +302,17 @@ class BaseClient(BaseConnection, AdminAPI):
                     f"Failed to get dimension from embedding function: {e}. "
                     f"Please ensure the embedding function has a 'dimension' attribute or can be called with a string input."
                 ) from e
-        
+
         # Handle configuration
-        # If not provided (sentinel), use default configuration
+        # Extract HNSWConfiguration from ConfigurationParam (handles both Configuration and HNSWConfiguration)
+        hnsw_config = None
+
         if configuration is _NOT_PROVIDED:
             # Use default configuration, but if embedding_function is provided, use its dimension
             if actual_dimension is not None:
-                configuration = HNSWConfiguration(dimension=actual_dimension, distance=DEFAULT_DISTANCE_METRIC)
+                hnsw_config = HNSWConfiguration(dimension=actual_dimension, distance=DEFAULT_DISTANCE_METRIC)
             else:
-                configuration = HNSWConfiguration(dimension=DEFAULT_VECTOR_DIMENSION, distance=DEFAULT_DISTANCE_METRIC)
+                hnsw_config = HNSWConfiguration(dimension=DEFAULT_VECTOR_DIMENSION, distance=DEFAULT_DISTANCE_METRIC)
         elif configuration is None:
             # Configuration is explicitly set to None
             # Try to calculate dimension from embedding_function
@@ -249,25 +325,31 @@ class BaseClient(BaseConnection, AdminAPI):
                     "  2. Provide an embedding_function to calculate dimension automatically, or\n"
                     "  3. Do not set configuration=None (use default configuration)."
                 )
-            
+
             # Use calculated dimension from embedding function and default distance metric
             if actual_dimension is not None:
-                configuration = HNSWConfiguration(dimension=actual_dimension, distance=DEFAULT_DISTANCE_METRIC)
+                hnsw_config = HNSWConfiguration(dimension=actual_dimension, distance=DEFAULT_DISTANCE_METRIC)
             else:
                 raise ValueError(
                     "Failed to calculate dimension from embedding function. "
                     "Please ensure the embedding function can be called with a string input."
                 )
-        
-        # Validate configuration type
-        if not isinstance(configuration, HNSWConfiguration):
-            raise TypeError(f"configuration must be HNSWConfiguration, got {type(configuration)}")
-        
+        else:
+            # Extract HNSWConfiguration from Configuration or use HNSWConfiguration directly
+            hnsw_config = _extract_hnsw_config(configuration)
+
+            # If Configuration was provided but hnsw is None, create default HNSWConfiguration
+            if hnsw_config is None:
+                if actual_dimension is not None:
+                    hnsw_config = HNSWConfiguration(dimension=actual_dimension, distance=DEFAULT_DISTANCE_METRIC)
+                else:
+                    hnsw_config = HNSWConfiguration(dimension=DEFAULT_VECTOR_DIMENSION, distance=DEFAULT_DISTANCE_METRIC)
+
         # If embedding_function is provided, validate configuration dimension matches
         if embedding_function is not None and actual_dimension is not None:
-            if configuration.dimension != actual_dimension:
+            if hnsw_config.dimension != actual_dimension:
                 raise ValueError(
-                    f"Configuration dimension ({configuration.dimension}) doesn't match "
+                    f"Configuration dimension ({hnsw_config.dimension}) doesn't match "
                     f"embedding function dimension ({actual_dimension}). "
                     f"Please update configuration to use dimension={actual_dimension} or remove dimension from configuration."
                 )
@@ -275,30 +357,31 @@ class BaseClient(BaseConnection, AdminAPI):
             dimension = actual_dimension
         else:
             # No embedding function, use configuration dimension
-            dimension = configuration.dimension
-        
+            dimension = hnsw_config.dimension
+
         # Extract distance from configuration
-        distance = configuration.distance
-        
-        # HNSW is the only supported index type
-        index_type = 'hnsw'
-        
+        distance = hnsw_config.distance
+
+        # Extract fulltext parser configuration
+        fulltext_config = _extract_fulltext_config(configuration)
+        fulltext_index_clause = _get_fulltext_index_sql(fulltext_config)
+
         # Construct table name: c$v1${name}
         table_name = CollectionNames.table_name(name)
-        
+
         # Construct CREATE TABLE SQL statement with HEAP organization
         sql = f"""CREATE TABLE `{table_name}` (
             _id varbinary(512) PRIMARY KEY NOT NULL,
             document string,
             embedding vector({dimension}),
             metadata json,
-            FULLTEXT INDEX idx_fts(document) WITH PARSER ik,
-            VECTOR INDEX idx_vec (embedding) with(distance={distance}, type={index_type}, lib=vsag)
+            FULLTEXT INDEX idx_fts(document) {fulltext_index_clause},
+            VECTOR INDEX idx_vec (embedding) {_get_vector_index_sql(hnsw_config)}
         ) ORGANIZATION = HEAP;"""
-        
+
         # Execute SQL to create table
-        self.execute(sql)
-        
+        self._execute(sql)
+
         # Create and return Collection object
         return Collection(
             client=self,
@@ -308,7 +391,7 @@ class BaseClient(BaseConnection, AdminAPI):
             distance=distance,
             **kwargs
         )
-    
+
     def get_collection(
         self,
         name: str,
@@ -334,7 +417,7 @@ class BaseClient(BaseConnection, AdminAPI):
         
         # Check if table exists by describing it
         try:
-            table_info = self.execute(f"DESCRIBE `{table_name}`")
+            table_info = self._execute(f"DESCRIBE `{table_name}`")
             if not table_info or len(table_info) == 0:
                 raise ValueError(f"Collection '{name}' does not exist (table '{table_name}' not found)")
         except Exception as e:
@@ -367,7 +450,7 @@ class BaseClient(BaseConnection, AdminAPI):
         # Extract distance from CREATE TABLE statement
         distance = None
         try:
-            create_table_result = self.execute(f"SHOW CREATE TABLE `{table_name}`")
+            create_table_result = self._execute(f"SHOW CREATE TABLE `{table_name}`")
             if create_table_result and len(create_table_result) > 0:
                 # Handle both dict and tuple formats
                 if isinstance(create_table_result[0], dict):
@@ -425,7 +508,7 @@ class BaseClient(BaseConnection, AdminAPI):
             raise ValueError(f"Collection '{name}' does not exist (table '{table_name}' not found)")
         
         # Execute DROP TABLE SQL
-        self.execute(f"DROP TABLE IF EXISTS `{table_name}`")
+        self._execute(f"DROP TABLE IF EXISTS `{table_name}`")
     
     def list_collections(self) -> List["Collection"]:
         """
@@ -437,15 +520,15 @@ class BaseClient(BaseConnection, AdminAPI):
         # List all tables that start with 'c$v1'
         # Use SHOW TABLES LIKE 'c$v1%' to filter collection tables
         try:
-            tables = self.execute("SHOW TABLES LIKE 'c$v1$%'")
+            tables = self._execute("SHOW TABLES LIKE 'c$v1$%'")
         except Exception:
             # Fallback: try to query information_schema
             try:
                 # Get current database name
-                db_result = self.execute("SELECT DATABASE()")
+                db_result = self._execute("SELECT DATABASE()")
                 if db_result and len(db_result) > 0:
                     db_name = db_result[0][0] if isinstance(db_result[0], (tuple, list)) else db_result[0].get('DATABASE()', '')
-                    tables = self.execute(
+                    tables = self._execute(
                         f"SELECT TABLE_NAME FROM information_schema.TABLES "
                         f"WHERE TABLE_SCHEMA = '{db_name}' AND TABLE_NAME LIKE 'c$v1$%'"
                     )
@@ -510,7 +593,7 @@ class BaseClient(BaseConnection, AdminAPI):
         # Check if table exists
         try:
             # Try to describe the table
-            table_info = self.execute(f"DESCRIBE `{table_name}`")
+            table_info = self._execute(f"DESCRIBE `{table_name}`")
             return table_info is not None and len(table_info) > 0
         except Exception:
             # If DESCRIBE fails, table doesn't exist
@@ -718,7 +801,7 @@ class BaseClient(BaseConnection, AdminAPI):
                  VALUES {','.join(values_list)}"""
         
         logger.debug(f"Executing SQL: {sql}")
-        self.execute(sql)
+        self._execute(sql)
         logger.info(f"✅ Successfully added {num_items} item(s) to collection '{collection_name}'")
     
     def _collection_update(
@@ -852,7 +935,7 @@ class BaseClient(BaseConnection, AdminAPI):
             sql = f"UPDATE `{table_name}` SET {', '.join(set_clauses)} WHERE {CollectionFieldNames.ID} = {id_sql}"
             
             logger.debug(f"Executing SQL: {sql}")
-            self.execute(sql)
+            self._execute(sql)
         
         logger.info(f"✅ Successfully updated {len(ids)} item(s) in collection '{collection_name}'")
     
@@ -1001,7 +1084,7 @@ class BaseClient(BaseConnection, AdminAPI):
                 if set_clauses:
                     sql = f"UPDATE `{table_name}` SET {', '.join(set_clauses)} WHERE {CollectionFieldNames.ID} = {id_sql}"
                     logger.debug(f"Executing SQL: {sql}")
-                    self.execute(sql)
+                    self._execute(sql)
             else:
                 # Insert new record
                 if doc_val:
@@ -1026,7 +1109,7 @@ class BaseClient(BaseConnection, AdminAPI):
                 sql = f"""INSERT INTO `{table_name}` ({CollectionFieldNames.ID}, {CollectionFieldNames.DOCUMENT}, {CollectionFieldNames.METADATA}, {CollectionFieldNames.EMBEDDING}) 
                          VALUES ({id_sql}, {doc_sql}, {meta_sql}, {vec_sql})"""
                 logger.debug(f"Executing SQL: {sql}")
-                self.execute(sql)
+                self._execute(sql)
         
         logger.info(f"✅ Successfully upserted {len(ids)} item(s) in collection '{collection_name}'")
     
@@ -1353,6 +1436,9 @@ class BaseClient(BaseConnection, AdminAPI):
         Returns:
             String ID
         """
+        if record_id is None:
+            return None
+        
         # If it's already a string, return as is
         if isinstance(record_id, str):
             return record_id
@@ -1783,6 +1869,7 @@ class BaseClient(BaseConnection, AdminAPI):
         rank: Optional[Dict[str, Any]] = None,
         n_results: int = 10,
         include: Optional[List[str]] = None,
+        dimension: Optional[int] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
@@ -1800,14 +1887,17 @@ class BaseClient(BaseConnection, AdminAPI):
             query: Full-text search configuration dict with:
                 - where_document: Document filter conditions (e.g., {"$contains": "text"})
                 - where: Metadata filter conditions (e.g., {"page": {"$gte": 5}})
+                - boost: Weight for text query when combining hybrid results (optional)
             knn: Vector search configuration dict with:
                 - query_texts: Query text(s) to be embedded (optional if query_embeddings provided)
                 - query_embeddings: Query vector(s) (optional if query_texts provided)
                 - where: Metadata filter conditions (optional)
                 - n_results: Number of results for vector search (optional)
+                - boost: Weight for vector search when combining hybrid results (optional)
             rank: Ranking configuration dict (e.g., {"rrf": {"rank_window_size": 60, "rank_constant": 60}})
             n_results: Final number of results to return after ranking (default: 10)
             include: Fields to include in results (optional)
+            dimension: Collection vector dimension for validating query_embeddings (optional)
             **kwargs: Additional parameters, including:
                 embedding_function: EmbeddingFunction instance to convert query_texts in knn to embeddings.
                                    Required if knn.query_texts is provided and collection doesn't have
@@ -1829,7 +1919,7 @@ class BaseClient(BaseConnection, AdminAPI):
         table_name = f"c$v1${collection_name}"
         
         # Build search_parm JSON
-        search_parm = self._build_search_parm(query, knn, rank, n_results, **kwargs)
+        search_parm = self._build_search_parm(query, knn, rank, n_results, dimension=dimension, **kwargs)
         
         # Convert search_parm to JSON string
         search_parm_json = json.dumps(search_parm, ensure_ascii=False)
@@ -1878,20 +1968,22 @@ class BaseClient(BaseConnection, AdminAPI):
     
     def _build_search_parm(
         self,
-        query: Optional[Dict[str, Any]],
-        knn: Optional[Dict[str, Any]],
+        query: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]],
+        knn: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]],
         rank: Optional[Dict[str, Any]],
         n_results: int,
+        dimension: Optional[int] = None,
         **kwargs
     ) -> Dict[str, Any]:
         """
         Build search_parm JSON from query, knn, and rank parameters
         
         Args:
-            query: Full-text search configuration dict
-            knn: Vector search configuration dict
+            query: Full-text search configuration dict or list of dicts
+            knn: Vector search configuration dict or list of dicts
             rank: Ranking configuration dict
             n_results: Final number of results to return
+            dimension: Collection dimension for validating query_embeddings (optional)
             **kwargs: Additional parameters, including:
                 embedding_function: EmbeddingFunction instance to convert query_texts in knn to embeddings.
                                    Required if knn.query_texts is provided. Must implement __call__
@@ -1903,18 +1995,32 @@ class BaseClient(BaseConnection, AdminAPI):
         search_parm = {}
         
         # Build query part (full-text search or scalar query)
+        query_expr_list: List[Dict[str, Any]] = []
         if query:
-            query_expr = self._build_query_expression(query)
-            if query_expr:
-                search_parm["query"] = query_expr
+            query_items = query if isinstance(query, list) else [query]
+            for query_item in query_items:
+                query_expr = self._build_query_expression(query_item)
+                if query_expr:
+                    query_expr_list.append(query_expr)
+        if query_expr_list:
+            search_parm["query"] = query_expr_list if len(query_expr_list) > 1 else query_expr_list[0]
         
         # Build knn part (vector search)
+        knn_expr_list: List[Dict[str, Any]] = []
         if knn:
-            knn_expr = self._build_knn_expression(knn, **kwargs)
-            if knn_expr:
-                search_parm["knn"] = knn_expr
+            knn_items = knn if isinstance(knn, list) else [knn]
+            for knn_item in knn_items:
+                knn_expr = self._build_knn_expression(knn_item, dimension=dimension, **kwargs)
+                if not knn_expr:
+                    continue
+                if isinstance(knn_expr, list):
+                    knn_expr_list.extend(knn_expr)
+                else:
+                    knn_expr_list.append(knn_expr)
+        if knn_expr_list:
+            search_parm["knn"] = knn_expr_list if len(knn_expr_list) > 1 else knn_expr_list[0]
         
-        if n_results:
+        if n_results is not None:
             search_parm["size"] = n_results
 
         # Build rank part
@@ -1934,6 +2040,7 @@ class BaseClient(BaseConnection, AdminAPI):
         """
         where_document = query.get("where_document")
         where = query.get("where")
+        boost = query.get("boost")
         
         # Case 1: Scalar query (metadata filtering only, no full-text search)
         if not where_document and where:
@@ -1942,22 +2049,16 @@ class BaseClient(BaseConnection, AdminAPI):
                 # If only one filter condition, check its type
                 if len(filter_conditions) == 1:
                     filter_cond = filter_conditions[0]
-                    # Check if it's a range query
-                    if "range" in filter_cond:
-                        return {"range": filter_cond["range"]}
-                    # Check if it's a term query
-                    elif "term" in filter_cond:
-                        return {"term": filter_cond["term"]}
-                    # Otherwise, it's a bool query, wrap in filter
-                    else:
-                        return {"bool": {"filter": filter_conditions}}
-                # Multiple filter conditions, wrap in bool
+                    # Directly return supported single condition types
+                    if any(key in filter_cond for key in ("range", "term", "terms", "bool")):
+                        return filter_cond
+                # Multiple filter conditions, wrap in bool filter
                 return {"bool": {"filter": filter_conditions}}
         
         # Case 2: Full-text search (with or without metadata filtering)
         if where_document:
             # Build document query using query_string
-            doc_query = self._build_document_query(where_document)
+            doc_query = self._build_document_query(where_document, boost=boost)
             if doc_query:
                 # Build filter from where condition
                 filter_conditions = self._build_metadata_filter_for_search_parm(where)
@@ -1976,12 +2077,13 @@ class BaseClient(BaseConnection, AdminAPI):
         
         return None
     
-    def _build_document_query(self, where_document: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _build_document_query(self, where_document: Dict[str, Any], boost: Optional[float] = None) -> Optional[Dict[str, Any]]:
         """
         Build document query from where_document condition using query_string
         
         Args:
             where_document: Document filter conditions
+            boost: Optional weight for this document query
             
         Returns:
             query_string query dict
@@ -1989,18 +2091,54 @@ class BaseClient(BaseConnection, AdminAPI):
         if not where_document:
             return None
         
+        def _with_boost(expr: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+            if boost is None or not expr:
+                return expr
+
+            def _apply_boost(target: Any) -> None:
+                if not isinstance(target, dict):
+                    return
+                if "query_string" in target and isinstance(target["query_string"], dict):
+                    target["query_string"]["boost"] = boost
+                    return
+                bool_clause = target.get("bool")
+                if isinstance(bool_clause, dict):
+                    for key in ("must", "should", "must_not", "filter"):
+                        clause = bool_clause.get(key)
+                        if isinstance(clause, list):
+                            for item in clause:
+                                _apply_boost(item)
+                        elif isinstance(clause, dict):
+                            _apply_boost(clause)
+
+            _apply_boost(expr)
+            return expr
+        
         # Handle $contains - use query_string
         if "$contains" in where_document:
             # Use pymysql's escape_string for safe escaping of query content
             query_content = where_document["$contains"]
             escaped_query = escape_string(query_content)
-            return {
+            return _with_boost({
                 "query_string": {
                     "fields": ["document"],
                     "query": escaped_query
                 }
-            }
+            })
         
+        # Handle $not_contains - wrap query_string in must_not bool
+        if "$not_contains" in where_document:
+            return _with_boost({
+                "bool": {
+                    "must_not": [{
+                        "query_string": {
+                            "fields": ["document"],
+                            "query": where_document["$not_contains"]
+                        }
+                    }]
+                }
+            })
+
         # Handle $and with $contains
         if "$and" in where_document:
             and_conditions = where_document["$and"]
@@ -2012,12 +2150,12 @@ class BaseClient(BaseConnection, AdminAPI):
             if contains_queries:
                 # Combine multiple $contains with AND (escape each query)
                 escaped_queries = [escape_string(q) for q in contains_queries]
-                return {
+                return _with_boost({
                     "query_string": {
                         "fields": ["document"],
                         "query": " ".join(escaped_queries)
                     }
-                }
+                })
         
         # Handle $or with $contains
         if "$or" in where_document:
@@ -2030,21 +2168,21 @@ class BaseClient(BaseConnection, AdminAPI):
             if contains_queries:
                 # Combine multiple $contains with OR (escape each query)
                 escaped_queries = [escape_string(q) for q in contains_queries]
-                return {
+                return _with_boost({
                     "query_string": {
                         "fields": ["document"],
                         "query": " OR ".join(escaped_queries)
                     }
-                }
+                })
         
         # Default: if it's a string, treat as $contains
         if isinstance(where_document, str):
-            return {
+            return _with_boost({
                 "query_string": {
                     "fields": ["document"],
                     "query": where_document
                 }
-            }
+            })
         
         return None
     
@@ -2064,6 +2202,15 @@ class BaseClient(BaseConnection, AdminAPI):
             return []
         
         return self._build_metadata_filter_conditions(where)
+
+    def _build_search_parm_field_name(self, key: str) -> str:
+        """
+        Build field name used in search_parm filters.
+        Supports special "#id" to refer to the primary key column directly.
+        """
+        if key == "#id" or key == CollectionFieldNames.ID:
+            return CollectionFieldNames.ID
+        return f"(JSON_EXTRACT(metadata, '$.{key}'))"
     
     def _build_metadata_filter_conditions(self, condition: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
@@ -2110,8 +2257,8 @@ class BaseClient(BaseConnection, AdminAPI):
             if key in ["$and", "$or", "$not"]:
                 continue
             
-            # Build field name with JSON_EXTRACT format
-            field_name = f"(JSON_EXTRACT(metadata, '$.{key}'))"
+            # Build field name with JSON_EXTRACT format (or _id for special key)
+            field_name = self._build_search_parm_field_name(key)
             
             if isinstance(value, dict):
                 # Handle comparison operators
@@ -2133,15 +2280,13 @@ class BaseClient(BaseConnection, AdminAPI):
                     elif op == "$gte":
                         range_conditions["gte"] = op_value
                     elif op == "$in":
-                        # For $in, create multiple term queries wrapped in should
-                        in_conditions = [{"term": {field_name: val}} for val in op_value]
-                        if in_conditions:
-                            result.append({"bool": {"should": in_conditions}})
+                        # For $in, use terms query to match any value in list
+                        if isinstance(op_value, (list, tuple)) and len(op_value) > 0:
+                            result.append({"terms": {field_name: list(op_value)}})
                     elif op == "$nin":
-                        # For $nin, create multiple term queries wrapped in must_not
-                        nin_conditions = [{"term": {field_name: val}} for val in op_value]
-                        if nin_conditions:
-                            result.append({"bool": {"must_not": nin_conditions}})
+                        # For $nin, use must_not with terms query
+                        if isinstance(op_value, (list, tuple)) and len(op_value) > 0:
+                            result.append({"bool": {"must_not": [{"terms": {field_name: list(op_value)}}]}})
                 
                 if range_conditions:
                     result.append({"range": {field_name: range_conditions}})
@@ -2153,7 +2298,12 @@ class BaseClient(BaseConnection, AdminAPI):
         
         return result
     
-    def _build_knn_expression(self, knn: Dict[str, Any], **kwargs) -> Optional[Dict[str, Any]]:
+    def _build_knn_expression(
+        self,
+        knn: Dict[str, Any],
+        dimension: Optional[int] = None,
+        **kwargs
+    ) -> Optional[Union[Dict[str, Any], List[Dict[str, Any]]]]:
         """
         Build knn expression from knn dict
         
@@ -2163,45 +2313,43 @@ class BaseClient(BaseConnection, AdminAPI):
                 - query_embeddings: Query vector(s) (optional if query_texts provided)
                 - where: Metadata filter conditions (optional)
                 - n_results: Number of results for vector search (optional)
+                - boost: Optional weight for this knn search route
             **kwargs: Additional parameters, including:
                 embedding_function: EmbeddingFunction instance to convert query_texts to embeddings.
                                    Required if query_texts is provided. Must implement __call__
                                    method that accepts Documents and returns Embeddings (List[List[float]]).
+            dimension: Optional collection dimension for validating embeddings
             
         Returns:
-            knn expression dict with optional filter
+            knn expression dict (or list of dicts when multiple query vectors) with optional filter
         """
         query_texts = knn.get("query_texts")
         query_embeddings = knn.get("query_embeddings")
         where = knn.get("where")
         n_results = knn.get("n_results", 10)
-        
-        # Handle vector generation logic:
-        # 1. If query_embeddings are provided, use them directly without embedding
-        # 2. If query_embeddings are not provided but query_texts are provided:
-        #    - If embedding_function is provided, use it to generate embeddings from query_texts
-        #    - If embedding_function is not provided, raise an error
-        # 3. If neither query_embeddings nor query_texts are provided, raise an error
+        boost = knn.get("boost")
         
         embedding_function = kwargs.get('embedding_function')
-        
-        # Get query vector
-        query_vector = None
-        if query_embeddings:
-            # Query embeddings provided, use them directly without embedding
-            if isinstance(query_embeddings, list) and len(query_embeddings) > 0:
-                if isinstance(query_embeddings[0], list):
-                    query_vector = query_embeddings[0]  # Use first vector
-                else:
-                    query_vector = query_embeddings
-        elif query_texts:
-            # Query embeddings not provided but query_texts are provided, check for embedding_function
+
+        def _normalize_vectors(raw_embeddings: Any) -> List[List[float]]:
+            if raw_embeddings is None:
+                return []
+            if isinstance(raw_embeddings, list) and raw_embeddings and isinstance(raw_embeddings[0], list):
+                return raw_embeddings  # type: ignore[return-value]
+            if isinstance(raw_embeddings, list):
+                return [raw_embeddings]  # type: ignore[list-item]
+            return []
+
+        vectors: List[List[float]] = []
+        if query_embeddings is not None:
+            vectors = _normalize_vectors(query_embeddings)
+        elif query_texts is not None:
             if embedding_function is not None:
                 try:
                     texts = query_texts if isinstance(query_texts, list) else [query_texts]
-                    embeddings = self._embed_texts(texts[0] if len(texts) > 0 else texts, embedding_function=embedding_function)
+                    embeddings = self._embed_texts(texts, embedding_function=embedding_function)
                     if embeddings and len(embeddings) > 0:
-                        query_vector = embeddings[0]
+                        vectors = embeddings
                 except Exception as e:
                     logger.error(f"Failed to generate embeddings from query_texts: {e}")
                     raise ValueError(f"Failed to generate embeddings from query_texts: {e}")
@@ -2213,30 +2361,42 @@ class BaseClient(BaseConnection, AdminAPI):
                     "  2. Provide embedding_function to auto-generate embeddings from knn.query_texts."
                 )
         else:
-            # Neither query_embeddings nor query_texts provided, raise an error
             raise ValueError(
                 "knn requires either query_embeddings or query_texts. "
                 "Please provide either:\n"
                 "  1. knn.query_embeddings directly, or\n"
                 "  2. knn.query_texts with embedding_function to generate embeddings."
             )
-        
-        if not query_vector:
+
+        if not vectors:
             return None
+
+        if dimension is not None:
+            for vec in vectors:
+                if len(vec) != dimension:
+                    raise ValueError(
+                        f"Embedding dimension mismatch: expected {dimension}, got {len(vec)}"
+                    )
         
-        # Build knn expression
-        knn_expr = {
-            "field": "embedding",
-            "k": n_results,
-            "query_vector": query_vector
-        }
-        
-        # Add filter using JSON_EXTRACT format
+        # Build knn expressions (one per vector)
+        knn_exprs: List[Dict[str, Any]] = []
         filter_conditions = self._build_metadata_filter_for_search_parm(where)
-        if filter_conditions:
-            knn_expr["filter"] = filter_conditions
+        for vector in vectors:
+            expr = {
+                "field": "embedding",
+                "k": n_results,
+                "query_vector": vector
+            }
+            if boost is not None:
+                expr["boost"] = boost
+            
+            # Add filter using JSON_EXTRACT format
+            if filter_conditions:
+                expr["filter"] = filter_conditions
+            
+            knn_exprs.append(expr)
         
-        return knn_expr
+        return knn_exprs if len(knn_exprs) > 1 else knn_exprs[0]
     
     def _build_source_fields(self, include: Optional[List[str]]) -> List[str]:
         """Build _source fields list from include parameter"""
@@ -2285,9 +2445,17 @@ class BaseClient(BaseConnection, AdminAPI):
         embeddings = []
         
         for row in result_rows:
-            # Extract id (may be in different column names)
-            row_id = row.get("id") or row.get("_id") or row.get("ID")
-            # Convert bytes _id to string format
+            # Extract id (handle different column names and fallbacks)
+            row_id = None
+            for key in ("id", "_id", "ID", "Id", "_ID"):
+                if key in row and row.get(key) is not None:
+                    row_id = row.get(key)
+                    break
+            if row_id is None:
+                for key in row.keys():
+                    if isinstance(key, str) and key.lower().endswith("id") and row.get(key) is not None:
+                        row_id = row.get(key)
+                        break
             row_id = self._convert_id_from_bytes(row_id)
             ids.append(row_id)
             

@@ -48,10 +48,6 @@ client = pyseekdb.Client(
 client = pyseekdb.Client(
     database="demo"        # Database name (path defaults to current working directory/seekdb.db)
 )
-
-# Execute SQL queries
-rows = client.execute("SELECT 1")
-print(rows)
 ```
 
 ### 1.2 Remote Server Client
@@ -176,20 +172,68 @@ Collections are the primary data structures in pyseekdb, similar to tables in tr
 
 ```python
 import pyseekdb
-from pyseekdb import DefaultEmbeddingFunction, HNSWConfiguration
+from pyseekdb import (
+    DefaultEmbeddingFunction,
+    HNSWConfiguration,
+    Configuration,
+    FulltextParserConfig
+)
 
 # Create a client
 client = pyseekdb.Client(host="127.0.0.1", port=2881, database="test")
 
-# Create a collection
+# Create a collection with default configuration
 collection = client.create_collection(
-    name="my_collection",
-    # embedding_function=DefaultEmbeddingFunction()  # Uses default model (384 dimensions)
+    name="my_collection"
+    # embedding_function defaults to DefaultEmbeddingFunction() (384 dimensions)
 )
 
 # Create a collection with custom embedding function
-ef = UserDefinedEmbeddingFunction(model_name='all-MiniLM-L6-v2') #UserDefinedEmbeddingFunction should be defined before
-config = HNSWConfiguration(dimension=384, distance='cosine')  # Must match EF dimension
+# Dimension will be automatically calculated from embedding function
+ef = UserDefinedEmbeddingFunction(model_name='all-MiniLM-L6-v2')
+collection = client.create_collection(
+    name="my_collection",
+    embedding_function=ef
+)
+
+# Recommended: Create a collection with Configuration wrapper
+# Using IK parser (default for Chinese text)
+config = Configuration(
+    hnsw=HNSWConfiguration(dimension=384, distance='cosine'),
+    fulltext_config=FulltextParserConfig(parser='ik')
+)
+collection = client.create_collection(
+    name="my_collection",
+    configuration=config,
+    embedding_function=ef
+)
+
+# Recommended: Create a collection with Configuration (only HNSW config, uses default parser)
+config = Configuration(
+    hnsw=HNSWConfiguration(dimension=384, distance='cosine')
+)
+collection = client.create_collection(
+    name="my_collection",
+    configuration=config,
+    embedding_function=ef
+)
+
+# Create a collection with Space parser (for space-separated languages)
+config = Configuration(
+    hnsw=HNSWConfiguration(dimension=384, distance='cosine'),
+    fulltext_config=FulltextParserConfig(parser='space')
+)
+collection = client.create_collection(
+    name="my_collection",
+    configuration=config,
+    embedding_function=ef
+)
+
+# Create a collection with Ngram parser and custom parameters
+config = Configuration(
+    hnsw=HNSWConfiguration(dimension=384, distance='cosine'),
+    fulltext_config=FulltextParserConfig(parser='ngram', params={'ngram_token_size': 3})
+)
 collection = client.create_collection(
     name="my_collection",
     configuration=config,
@@ -197,9 +241,13 @@ collection = client.create_collection(
 )
 
 # Create a collection without embedding function (embeddings must be provided manually)
+# Recommended: Use Configuration wrapper
+config = Configuration(
+    hnsw=HNSWConfiguration(dimension=128, distance='cosine')
+)
 collection = client.create_collection(
     name="my_collection",
-    configuration=HNSWConfiguration(dimension=128, distance='cosine'),
+    configuration=config,
     embedding_function=None  # Explicitly disable embedding function
 )
 
@@ -211,13 +259,26 @@ collection = client.get_or_create_collection(
 
 **Parameters:**
 - `name` (str): Collection name (required)
-- `configuration` (HNSWConfiguration, optional): Index configuration with dimension and distance metric
-  - If not provided, uses default (dimension=384, distance='cosine')
+- `configuration` (Configuration, HNSWConfiguration, or None, optional): Index configuration
+  - **Recommended:** `Configuration` - Wrapper class that can include both `HNSWConfiguration` and `FulltextParserConfig`
+    - Use `Configuration(hnsw=HNSWConfiguration(...))` even when only vector index config is needed
+    - Allows easy addition of fulltext parser config later
+  - `HNSWConfiguration`: Vector index configuration with `dimension` and `distance` metric (backward compatibility)
+  - If not provided, uses default (dimension=384, distance='cosine', parser='ik')
   - If set to `None`, dimension will be calculated from `embedding_function`
 - `embedding_function` (EmbeddingFunction, optional): Function to convert documents to embeddings
   - If not provided, uses `DefaultEmbeddingFunction()` (384 dimensions)
   - If set to `None`, collection will not have an embedding function
   - If provided, the dimension will be automatically calculated and validated against `configuration.dimension`
+
+**Fulltext Parser Options:**
+- `'ik'` (default): IK parser for Chinese text segmentation
+- `'space'`: Space-separated tokenizer for languages like English
+- `'ngram'`: N-gram tokenizer
+- `'ngram2'`: 2-gram tokenizer
+- `'beng'`: Bengali text parser
+
+For more information about parser, please refer to [create_index section tokenizer_option](https://www.oceanbase.com/docs/common-oceanbase-database-cn-1000000004479548#tokenizer_option).
 
 **Note:** When `embedding_function` is provided, the system will automatically calculate the vector dimension by calling the function. If `configuration.dimension` is also provided, it must match the embedding function's dimension, otherwise a `ValueError` will be raised.
 
@@ -735,209 +796,139 @@ results = collection.get(where={"category": {"$eq": "AI"}}, limit=10)
 
 ### 5.3 Hybrid Search
 
-The `hybrid_search()` method combines full-text search and vector similarity search with ranking.
+`collection.hybrid_search()` runs full-text/scalar queries and vector KNN search in parallel, then fuses the results (RRF is supported). You can pass raw dicts/lists or a `HybridSearch` builder (the builder can be given as the first argument or via `search=`; when present it overrides other parameters).
 
-**Behavior with Embedding Function:**
+**Parameters（dict mode）**
+- `query` (dict or List[dict], optional): full-text/scalar routes
+  - `where_document`: `$contains` / `$not_contains` plus `$and` / `$or` combinations of those clauses
+  - `where`: metadata filters (see 5.4) including logical operators and `#id`
+  - `boost`: weight for this text route when results are fused
+- `knn` (dict or List[dict], optional): vector routes
+  - `query_embeddings`: `List[float]` or `List[List[float]]`; validated against `collection.dimension` when present
+  - `query_texts`: str or List[str]; auto-embedded with the collection's `embedding_function` (missing function raises `ValueError`)
+  - `where`: metadata filters for this vector route
+  - `n_results`: candidates per vector route (k, default 10)
+  - `boost`: weight for this vector route
+- `rank` (dict, optional): ranking config; RRF tested via `{"rrf": {...}}` or `{}`. Omit to use single-route ordering.
+- `n_results` (int): final fused result count (default 10).
+- `include` (List[str], optional): fields to return. `ids`/`distances` are always returned; `documents`/`metadatas` are returned by default when `include` is `None`; add `"embeddings"` to fetch vectors.
+- `search` (`HybridSearch`, optional): fluent builder; overrides `query`/`knn`/`rank`/`include`/`n_results`.
 
-In the `knn` parameter:
-1. **If `query_embeddings` are provided:** embeddings are used directly, `embedding_function` is NOT called
-2. **If `query_embeddings` are NOT provided but `query_texts` are provided:**
-   - If collection has an `embedding_function`, it will automatically generate query embeddings from texts
-   - If collection does NOT have an `embedding_function`, a `ValueError` will be raised
-3. **If neither `query_embeddings` nor `query_texts` are provided in `knn`:** Only full-text search will be performed (if `query` is provided)
+**Return format**
+- Query-compatible dict: `ids`, `distances`, optionally `documents` / `metadatas` / `embeddings`. Hybrid search returns a single outer list (one fused result set).
 
+**Examples**
 ```python
-# Hybrid search with both full-text and vector search (using query_texts)
+# Full-text + vector with rank fusion (dict style)
 results = collection.hybrid_search(
     query={
         "where_document": {"$contains": "machine learning"},
         "where": {"category": {"$eq": "science"}},
-        "n_results": 10
+        "boost": 0.5,
     },
     knn={
-        "query_texts": ["AI research"],  # Will be embedded automatically
+        "query_texts": ["AI research"],  # auto-embedded via collection.embedding_function
         "where": {"year": {"$gte": 2020}},
-        "n_results": 10
+        "n_results": 10,  # k per vector route
+        "boost": 0.8,
     },
-    rank={"rrf": {}},  # Reciprocal Rank Fusion
+    rank={"rrf": {"rank_window_size": 60, "rank_constant": 60}},
     n_results=5,
-    include=["documents", "metadatas", "embeddings"]
+    include=["documents", "metadatas", "embeddings"],
 )
 
-# Hybrid search with query_embeddings (embedding_function not used)
+# Vector-only search using explicit embeddings (dimension is validated)
 results = collection.hybrid_search(
-    query={
-        "where_document": {"$contains": "machine learning"},
-        "n_results": 10
-    },
-    knn={
-        "query_embeddings": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],  # Used directly
-        "n_results": 10
-    },
-    rank={"rrf": {}},
-    n_results=5
+    knn={"query_embeddings": [[0.1, 0.2, 0.3]], "n_results": 8},
+    n_results=5,
+    include=["documents", "metadatas"],
 )
 
-# Hybrid search with multiple query texts (batch)
-results = collection.hybrid_search(
-    query={
-        "where_document": {"$contains": "AI"},
-        "n_results": 10
-    },
-    knn={
-        "query_texts": ["machine learning", "neural networks"],  # Multiple queries
-        "n_results": 10
-    },
-    rank={"rrf": {}},
-    n_results=5
+# Pass a HybridSearch builder (takes precedence over other args)
+from pyseekdb import (
+    HybridSearch,
+    DOCUMENT,
+    TEXT,
+    EMBEDDINGS,
+    K,
+    DOCUMENTS,
+    METADATAS,
 )
+
+search = (
+    HybridSearch()
+    .query(DOCUMENT.contains("machine learning"), K("category") == "AI", boost=0.6)
+    .knn(TEXT("AI research"), K("year") >= 2020, n_results=10, boost=0.8)
+    .limit(5)
+    .select(DOCUMENTS, METADATAS, EMBEDDINGS)
+    .rank({"rrf": {}})
+)
+results = collection.hybrid_search(search)
 ```
 
-**Parameters:**
-- `query` (dict, optional): Full-text search configuration with:
-  - `where_document`: Document filter conditions
-  - `where`: Metadata filter conditions
-  - `n_results`: Number of results for full-text search
-- `knn` (dict, optional): Vector search configuration with:
-  - `query_texts` (str or List[str], optional): Query text(s) to be embedded
-    - If `query_embeddings` not provided, `query_texts` will be converted to embeddings using collection's `embedding_function`
-  - `query_embeddings` (List[float] or List[List[float]], optional): Query vector(s)
-    - If provided, used directly (embedding_function is ignored)
-  - `where`: Metadata filter conditions (optional)
-  - `n_results`: Number of results for vector search (optional)
-- `rank` (dict, optional): Ranking configuration (e.g., `{"rrf": {"rank_window_size": 60, "rank_constant": 60}}`)
-- `n_results` (int): Final number of results to return after ranking (default: 10)
-- `include` (List[str], optional): Fields to include in results
+**HybridSearch builder tips**
+- Chain multiple `.query(...)` / `.knn(...)` calls to emit multiple routes; providing multiple `query_texts` / `query_embeddings` also expands KNN routes automatically.
+- `.limit(n)` sets the final fused `n_results`; `.select(...)` controls `include` (e.g., `DOCUMENTS`, `METADATAS`, `EMBEDDINGS`).
+- Handy builders for conditions: `DOCUMENT.contains(...)` / `DOCUMENT.not_contains(...)`, `TEXT("...")`, `EMBEDDINGS([...])`, `K("field")` with `==`, `!=`, `<`, `<=`, `>`, `>=`, `.in_`, `.nin`; combine document/metadata expressions with `&` and `|`.
+- Embeddings supplied through `EMBEDDINGS(...)` are dimension-checked when the collection defines a dimension.
 
-**Returns:**
-Dict with keys (query-compatible format):
-- `ids`: `List[List[str]]` - List of ID lists (one list for hybrid search result)
-- `documents`: `Optional[List[List[str]]]` - List of document lists (if included)
-- `metadatas`: `Optional[List[List[Dict]]]` - List of metadata lists (if included)
-- `embeddings`: `Optional[List[List[List[float]]]]` - List of embedding lists (if included)
-- `distances`: `Optional[List[List[float]]]` - List of distance lists
-
-**Usage:**
+#### Building a HybridSearch (builder how-to)
+1) Import & create
 ```python
-# Hybrid search returns results in query-compatible format
-results = collection.hybrid_search(
-    query={"where_document": {"$contains": "machine learning"}},
-    knn={"query_texts": ["AI research"]},
-    rank={"rrf": {}},
-    n_results=5
-)
-# results["ids"][0] contains IDs for the hybrid search
-# results["documents"][0] contains documents for the hybrid search
-# results["distances"][0] contains distances for the hybrid search
+from pyseekdb import HybridSearch, DOCUMENT, TEXT, EMBEDDINGS, K, DOCUMENTS, METADATAS
+hs = HybridSearch()
 ```
+2) Add full-text / scalar routes (can be called multiple times)
+```python
+hs = hs.query(
+    DOCUMENT.contains("machine learning") & DOCUMENT.not_contains("deprecated"),
+    K("category") == "AI",
+    K("year") >= 2020,
+    n_results=8,       # candidates per text route
+    boost=0.5          # weight for this text route
+)
+```
+3) Add vector routes (text or explicit embeddings; can be called multiple times)
+```python
+# Text-to-vec (requires collection.embedding_function)
+hs = hs.knn(TEXT(["AI research", "deep learning"]), K("score") >= 80, n_results=12, boost=1.0)
 
-**Note:** The `embedding_function` used is the one associated with the collection. You cannot override it per-search.
+# Direct embeddings (dimension-validated)
+hs = hs.knn(EMBEDDINGS([0.1, 0.2, 0.3]), K("tag").is_in(["ml", "python"]), n_results=6, boost=0.7)
+
+# Or pass a ready-to-use knn dict
+hs = hs.knn({"query_texts": ["semantic search"], "where": {"topic": {"$eq": "nlp"}}, "n_results": 10, "boost": 0.9})
+```
+4) Ranking and final wiring
+```python
+hs = hs.rank()  # defaults to rrf; or hs.rank("rrf", rank_window_size=60, rank_constant=60)
+hs = hs.limit(5)            # final fused result count
+hs = hs.select(DOCUMENTS, METADATAS, EMBEDDINGS)  # include embeddings explicitly when needed
+```
+5) Execute
+```python
+results = collection.hybrid_search(hs)
+```
+6) Key behaviors & gotchas
+- Multiple `.query(...)` / `.knn(...)` calls produce multiple routes; `TEXT([...])` or multiple embeddings also auto-expand into multiple routes.
+- `.rank()` defaults to `rrf`; only `rrf` is supported, with optional `rank_window_size` and `rank_constant` keyword args. Dict form is still accepted but should not mix with kwargs.
+- `query_texts` requires the collection’s `embedding_function`; otherwise use `query_embeddings`.
+- Dimension mismatches (when `collection.dimension` is known) raise `ValueError`.
+- `ids`/`distances` always return; `documents`/`metadatas` return by default when `include=None`; add `embeddings` via `.select(...)` or `include` to fetch vectors.
 
 ### 5.4 Filter Operators
 
 #### Metadata Filters (`where` parameter)
-
-- `$eq`: Equal to (simplified form is also supported)
-  ```python
-  # Simplified form (recommended for equality)
-  where={"category": "AI"}
-  
-  # Explicit $eq operator (also supported)
-  where={"category": {"$eq": "AI"}}
-  ```
-
-- `$ne`: Not equal to
-  ```python
-  where={"status": {"$ne": "deleted"}}
-  ```
-
-- `$gt`: Greater than
-  ```python
-  where={"score": {"$gt": 90}}
-  ```
-
-- `$gte`: Greater than or equal to
-  ```python
-  where={"score": {"$gte": 90}}
-  ```
-
-- `$lt`: Less than
-  ```python
-  where={"score": {"$lt": 50}}
-  ```
-
-- `$lte`: Less than or equal to
-  ```python
-  where={"score": {"$lte": 50}}
-  ```
-
-- `$in`: Value in array
-  ```python
-  where={"tag": {"$in": ["ml", "python", "ai"]}}
-  ```
-
-- `$nin`: Value not in array
-  ```python
-  where={"tag": {"$nin": ["deprecated", "old"]}}
-  ```
-
-- `$or`: Logical OR
-  ```python
-  # Simplified equality form
-  where={
-      "$or": [
-          {"category": "AI"},
-          {"tag": "python"}
-      ]
-  }
-  # Or with explicit $eq:
-  # where={"$or": [{"category": {"$eq": "AI"}}, {"tag": {"$eq": "python"}}]}
-  ```
-
-- `$and`: Logical AND
-  ```python
-  # Simplified equality form
-  where={
-      "$and": [
-          {"category": "AI"},
-          {"score": {"$gte": 90}}
-      ]
-  }
-  # Or with explicit $eq:
-  # where={"$and": [{"category": {"$eq": "AI"}}, {"score": {"$gte": 90}}]}
-  ```
+- `$eq` (or direct equality) / `$ne` / `$gt` / `$gte` / `$lt` / `$lte`
+- `$in` / `$nin` for membership checks
+- `$or` / `$and` for logical composition
+- `$not` for negation
+- `#id` to filter by primary key (e.g., `{"#id": {"$in": ["id1", "id2"]}}`)
 
 #### Document Filters (`where_document` parameter)
-
-- `$contains`: Full-text search (contains substring)
-  ```python
-  where_document={"$contains": "machine learning"}
-  ```
-
-- `$regex`: Regular expression matching (if supported)
-  ```python
-  where_document={"$regex": "pattern.*"}
-  ```
-
-- `$or`: Logical OR for document filters
-  ```python
-  where_document={
-      "$or": [
-          {"$contains": "machine learning"},
-          {"$contains": "artificial intelligence"}
-      ]
-  }
-  ```
-
-- `$and`: Logical AND for document filters
-  ```python
-  where_document={
-      "$and": [
-          {"$contains": "machine"},
-          {"$contains": "learning"}
-      ]
-  }
-  ```
+- `$contains`: full-text match
+- `$not_contains`: exclude matches
+- `$or` / `$and` combining multiple `$contains` clauses
 
 ### 5.5 Collection Information Methods
 
@@ -1013,11 +1004,11 @@ class SentenceTransformerCustomEmbeddingFunction(EmbeddingFunction[Documents]):
     """
     A custom embedding function using sentence-transformers with a specific model.
     """
-    
+
     def __init__(self, model_name: str = "all-MiniLM-L6-v2", device: str = "cpu"):
         """
         Initialize the sentence-transformer embedding function.
-        
+
         Args:
             model_name: Name of the sentence-transformers model to use
             device: Device to run the model on ('cpu' or 'cuda')
@@ -1026,7 +1017,7 @@ class SentenceTransformerCustomEmbeddingFunction(EmbeddingFunction[Documents]):
         self.device = device
         self._model = None
         self._dimension = None
-    
+
     def _ensure_model_loaded(self):
         """Lazy load the embedding model"""
         if self._model is None:
@@ -1041,51 +1032,54 @@ class SentenceTransformerCustomEmbeddingFunction(EmbeddingFunction[Documents]):
                     "sentence-transformers is not installed. "
                     "Please install it with: pip install sentence-transformers"
                 )
-    
+
     @property
     def dimension(self) -> int:
         """Get the dimension of embeddings produced by this function"""
         self._ensure_model_loaded()
         return self._dimension
-    
+
     def __call__(self, input: Documents) -> Embeddings:
         """
         Generate embeddings for the given documents.
-        
+
         Args:
             input: Single document (str) or list of documents (List[str])
-            
+
         Returns:
             List of embedding embeddings
         """
         self._ensure_model_loaded()
-        
+
         # Handle single string input
         if isinstance(input, str):
             input = [input]
-        
+
         # Handle empty input
         if not input:
             return []
-        
+
         # Generate embeddings
         embeddings = self._model.encode(
             input,
             convert_to_numpy=True,
             show_progress_bar=False
         )
-        
+
         # Convert numpy arrays to lists
         return [embedding.tolist() for embedding in embeddings]
 
 # Use the custom embedding function
+from pyseekdb import Configuration, HNSWConfiguration
 ef = SentenceTransformerCustomEmbeddingFunction(
     model_name='all-MiniLM-L6-v2',
     device='cpu'
 )
 collection = client.create_collection(
     name="my_collection",
-    configuration=HNSWConfiguration(dimension=384, distance='cosine'),
+    configuration=Configuration(
+        hnsw=HNSWConfiguration(dimension=384, distance='cosine')
+    ),
     embedding_function=ef
 )
 ```
@@ -1106,11 +1100,11 @@ class OpenAIEmbeddingFunction(EmbeddingFunction[Documents]):
     """
     A custom embedding function using OpenAI's embedding API.
     """
-    
+
     def __init__(self, model_name: str = "text-embedding-ada-002", api_key: str = None):
         """
         Initialize the OpenAI embedding function.
-        
+
         Args:
             model_name: Name of the OpenAI embedding model
             api_key: OpenAI API key (if not provided, uses OPENAI_API_KEY env var)
@@ -1119,10 +1113,10 @@ class OpenAIEmbeddingFunction(EmbeddingFunction[Documents]):
         self.api_key = api_key or os.environ.get('OPENAI_API_KEY')
         if not self.api_key:
             raise ValueError("OpenAI API key is required")
-        
+
         # Dimension for text-embedding-ada-002 is 1536
         self._dimension = 1536 if "ada-002" in model_name else None
-    
+
     @property
     def dimension(self) -> int:
         """Get the dimension of embeddings produced by this function"""
@@ -1130,44 +1124,47 @@ class OpenAIEmbeddingFunction(EmbeddingFunction[Documents]):
             # Call API to get dimension (or use known values)
             raise ValueError("Dimension not set for this model")
         return self._dimension
-    
+
     def __call__(self, input: Documents) -> Embeddings:
         """
         Generate embeddings using OpenAI API.
-        
+
         Args:
             input: Single document (str) or list of documents (List[str])
-            
+
         Returns:
             List of embedding embeddings
         """
         # Handle single string input
         if isinstance(input, str):
             input = [input]
-        
+
         # Handle empty input
         if not input:
             return []
-        
+
         # Call OpenAI API
         response = openai.Embedding.create(
             model=self.model_name,
             input=input,
             api_key=self.api_key
         )
-        
+
         # Extract embeddings
         embeddings = [item['embedding'] for item in response['data']]
         return embeddings
 
 # Use the custom embedding function
+from pyseekdb import Configuration, HNSWConfiguration
 ef = OpenAIEmbeddingFunction(
     model_name='text-embedding-ada-002',
     api_key='your-api-key'
 )
 collection = client.create_collection(
     name="my_collection",
-    configuration=HNSWConfiguration(dimension=1536, distance='cosine'),
+    configuration=Configuration(
+        hnsw=HNSWConfiguration(dimension=1536, distance='cosine')
+    ),
     embedding_function=ef
 )
 ```
@@ -1195,11 +1192,15 @@ When creating a custom embedding function, ensure:
 Once you've created a custom embedding function, use it when creating or getting collections:
 
 ```python
+from pyseekdb import Configuration, HNSWConfiguration
+
 # Create collection with custom embedding function
 ef = MyCustomEmbeddingFunction()
 collection = client.create_collection(
     name="my_collection",
-    configuration=HNSWConfiguration(dimension=ef.dimension, distance='cosine'),
+    configuration=Configuration(
+        hnsw=HNSWConfiguration(dimension=ef.dimension, distance='cosine')
+    ),
     embedding_function=ef
 )
 

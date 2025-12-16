@@ -19,7 +19,7 @@ import pyseekdb
 
 # ==================== Environment Variable Configuration ====================
 # Embedded mode
-SEEKDB_PATH = os.environ.get('SEEKDB_PATH', os.path.join(project_root, "seekdb_store"))
+SEEKDB_PATH = os.environ.get('SEEKDB_PATH', os.path.join(project_root, "seekdb.db"))
 SEEKDB_DATABASE = os.environ.get('SEEKDB_DATABASE', 'test')
 
 # Server mode
@@ -115,7 +115,7 @@ class TestCollectionQuery:
             # Use CAST to convert string to binary for varbinary(512) field
             sql = f"""INSERT INTO `{table_name}` (_id, document, embedding, metadata) 
                      VALUES (CAST('{id_str_escaped}' AS BINARY), '{document_str}', '{vector_str}', '{metadata_str}')"""
-            client._server.execute(sql)
+            client._server._execute(sql)
         
         print(f"   Inserted {len(test_data)} test records (dimension={dimension})")
     
@@ -268,7 +268,7 @@ class TestCollectionQuery:
         
         # Test connection
         try:
-            result = client._server.execute("SELECT 1 as test")
+            result = client._server._execute("SELECT 1 as test")
             assert result is not None
         except Exception as e:
             pytest.fail(f"Server connection failed ({SERVER_HOST}:{SERVER_PORT}): {e}")
@@ -402,7 +402,7 @@ class TestCollectionQuery:
         
         # Test connection
         try:
-            result = client._server.execute("SELECT 1 as test")
+            result = client._server._execute("SELECT 1 as test")
             assert result is not None
         except Exception as e:
             pytest.fail(f"OceanBase connection failed ({OB_HOST}:{OB_PORT}): {e}")

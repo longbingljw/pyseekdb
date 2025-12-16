@@ -44,9 +44,9 @@ from .client import (
     BaseConnection,
     BaseClient,
     ClientAPI,
+    Configuration,
+    FulltextParserConfig,
     HNSWConfiguration,
-    DEFAULT_VECTOR_DIMENSION,
-    DEFAULT_DISTANCE_METRIC,
     EmbeddingFunction,
     DefaultEmbeddingFunction,
     get_default_embedding_function,
@@ -58,6 +58,18 @@ from .client import (
     Database,
 )
 from .client.collection import Collection
+from .client.hybrid_search import (
+    HybridSearch,
+    DOCUMENT,
+    TEXT,
+    EMBEDDINGS,
+    K,
+    IDS,
+    DOCUMENTS,
+    METADATAS,
+    EMBEDDINGS_FIELD,
+    SCORES,
+)
 
 try:
   __version__ = importlib.metadata.version("pyseekdb")
@@ -70,9 +82,9 @@ __all__ = [
     'BaseConnection',
     'BaseClient',
     'ClientAPI',
+    'Configuration',
+    'FulltextParserConfig',
     'HNSWConfiguration',
-    'DEFAULT_VECTOR_DIMENSION',
-    'DEFAULT_DISTANCE_METRIC',
     'EmbeddingFunction',
     'DefaultEmbeddingFunction',
     'get_default_embedding_function',
@@ -83,5 +95,15 @@ __all__ = [
     'AdminAPI',
     'AdminClient',
     'Database',
+    'HybridSearch',
+    'DOCUMENT',
+    'TEXT',
+    'EMBEDDINGS',
+    'K',
+    'IDS',
+    'DOCUMENTS',
+    'METADATAS',
+    'EMBEDDINGS_FIELD',
+    'SCORES',
 ]
 

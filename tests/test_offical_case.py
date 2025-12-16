@@ -23,7 +23,7 @@ import pyseekdb  # noqa: E402
 
 # ==================== Environment Variable Configuration ====================
 # Embedded mode
-SEEKDB_PATH = os.environ.get("SEEKDB_PATH", os.path.join(project_root, "seekdb_store"))
+SEEKDB_PATH = os.environ.get("SEEKDB_PATH", os.path.join(project_root, "seekdb.db"))
 SEEKDB_DATABASE = os.environ.get("SEEKDB_DATABASE", "test")
 
 # Server mode
@@ -138,7 +138,7 @@ class TestOfficialExample:
         )
 
         try:
-            result = client._server.execute("SELECT 1 as test")
+            result = client._server._execute("SELECT 1 as test")
             assert result and result[0].get("test", 1) == 1
         except Exception as exc:
             pytest.fail(f"seekdb server connection failed ({SERVER_HOST}:{SERVER_PORT}): {exc}")
@@ -162,7 +162,7 @@ class TestOfficialExample:
         )
 
         try:
-            result = client._server.execute("SELECT 1 as test")
+            result = client._server._execute("SELECT 1 as test")
             assert result and result[0].get("test", 1) == 1
         except Exception as exc:
             pytest.fail(f"OceanBase connection failed ({OB_HOST}:{OB_PORT}): {exc}")

@@ -8,7 +8,7 @@ Collection Management (ClientAPI):
 - Returns: _ClientProxy (collection operations only)
 
 Database Management (AdminAPI):
-- AdminClient() - Smart factory for Embedded/Remote Server mode  
+- AdminClient() - Smart factory for Embedded/Remote Server mode
 - Returns: _AdminClientProxy (database operations only)
 
 All factories use the underlying ServerAPI implementations:
@@ -22,10 +22,12 @@ from typing import Optional
 from .base_connection import BaseConnection
 from .client_base import (
     BaseClient,
-    ClientAPI,
+    ClientAPI
+)
+from .configuration import (
+    Configuration,
     HNSWConfiguration,
-    DEFAULT_VECTOR_DIMENSION,
-    DEFAULT_DISTANCE_METRIC
+    FulltextParserConfig
 )
 from .embedding_function import (
     EmbeddingFunction,
@@ -36,6 +38,18 @@ from .client_seekdb_embedded import SeekdbEmbeddedClient
 from .client_seekdb_server import RemoteServerClient
 from .database import Database
 from .admin_client import AdminAPI, _AdminClientProxy, _ClientProxy
+from .hybrid_search import (
+    HybridSearch,
+    DOCUMENT,
+    TEXT,
+    EMBEDDINGS,
+    K,
+    IDS,
+    DOCUMENTS,
+    METADATAS,
+    EMBEDDINGS_FIELD,
+    SCORES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +58,8 @@ __all__ = [
     'BaseClient',
     'ClientAPI',
     'HNSWConfiguration',
-    'DEFAULT_VECTOR_DIMENSION',
-    'DEFAULT_DISTANCE_METRIC',
+    'Configuration',
+    'FulltextParserConfig',
     'EmbeddingFunction',
     'DefaultEmbeddingFunction',
     'get_default_embedding_function',
@@ -55,6 +69,16 @@ __all__ = [
     'AdminAPI',
     'AdminClient',
     'Database',
+    'HybridSearch',
+    'DOCUMENT',
+    'TEXT',
+    'EMBEDDINGS',
+    'K',
+    'IDS',
+    'DOCUMENTS',
+    'METADATAS',
+    'EMBEDDINGS_FIELD',
+    'SCORES',
 ]
 
 def Client(

@@ -139,24 +139,15 @@ class TestSecuritySQLInjection:
         """Run a single test with its own collection"""
         collection_name = f"security_{test_name}_collection"
         
-        # Clean up existing collection
-        try:
-            client.delete_collection(collection_name)
-        except:
-            pass
-        
         # Create new collection
-        collection = client.create_collection(name=collection_name)
+        collection = client.get_or_create_collection(name=collection_name)
         
         try:
             # Run the test method
             test_method(collection)
         finally:
             # Cleanup
-            try:
-                client.delete_collection(collection_name)
-            except:
-                pass
+            self._cleanup_collection(client, collection_name)
     
     def _test_add_operation_security(self, collection):
         """Test ADD operation with security attack vectors"""
@@ -365,10 +356,22 @@ class TestSecuritySQLInjection:
         assert result is not None
         assert len(result["ids"]) > 0
 
+    def _cleanup_collection(self, client, name: str):
+        """Clean up test collection"""
+        try:
+            client.delete_collection(name=name)
+        except Exception as cleanup_error:  # pragma: no cover - best effort cleanup
+            print(f"Warning: failed to cleanup collection '{name}': {cleanup_error}")
+    
     # ==================== Mode-specific Test Methods ====================
     
     def test_embedded_security_sql_injection(self):
-        """Run security tests in embedded mode"""
+        """Security SQL injection tests using embedded client (SeekdbEmbedded)"""
+        try:
+            import pylibseekdb  # noqa: F401
+        except ImportError:
+            pytest.fail("seekdb embedded package is not installed")
+        
         # Use temporary directory for embedded mode
         temp_dir = tempfile.mkdtemp(prefix="pyseekdb_security_test_")
         
@@ -394,7 +397,7 @@ class TestSecuritySQLInjection:
                 pass
     
     def test_server_security_sql_injection(self):
-        """Run security tests in server mode"""
+        """Security SQL injection tests using seekdb server (RemoteServerClient default tenant)"""
         admin = pyseekdb.AdminClient(
             host=SERVER_HOST,
             port=SERVER_PORT,
@@ -411,16 +414,24 @@ class TestSecuritySQLInjection:
         client = pyseekdb.Client(
             host=SERVER_HOST,
             port=SERVER_PORT,
+            tenant="sys",
             database=SERVER_DATABASE,
             user=SERVER_USER,
             password=SERVER_PASSWORD
         )
         
+        # Test connection
+        try:
+            result = client._server._execute("SELECT 1 as test")
+            assert result and result[0].get("test", 1) == 1
+        except Exception as exc:
+            pytest.fail(f"seekdb server connection failed ({SERVER_HOST}:{SERVER_PORT}): {exc}")
+        
         # Run all security tests
         self.run_security_tests(client, admin)
     
     def test_oceanbase_security_sql_injection(self):
-        """Run security tests in oceanbase mode"""
+        """Security SQL injection tests using OceanBase deployment"""
         admin = pyseekdb.AdminClient(
             host=OB_HOST,
             port=OB_PORT,
@@ -444,28 +455,16 @@ class TestSecuritySQLInjection:
             password=OB_PASSWORD
         )
         
+        # Test connection
+        try:
+            result = client._server._execute("SELECT 1 as test")
+            assert result and result[0].get("test", 1) == 1
+        except Exception as exc:
+            pytest.fail(f"OceanBase connection failed ({OB_HOST}:{OB_PORT}): {exc}")
+        
         # Run all security tests
         self.run_security_tests(client, admin)
 
 
-# ==================== Standalone Test Functions ====================
-
-def test_embedded():
-    """Run embedded security tests - called by CI with -k 'test_embedded'"""
-    test_instance = TestSecuritySQLInjection()
-    test_instance.test_embedded_security_sql_injection()
-
-def test_server():
-    """Run server security tests - called by CI with -k 'test_server'"""
-    test_instance = TestSecuritySQLInjection()
-    test_instance.test_server_security_sql_injection()
-
-def test_oceanbase():
-    """Run oceanbase security tests - called by CI with -k 'test_oceanbase'"""
-    test_instance = TestSecuritySQLInjection()
-    test_instance.test_oceanbase_security_sql_injection()
-
-
 if __name__ == "__main__":
-    # Run all tests
-    pytest.main([__file__, "-v"])
+    pytest.main([__file__, "-v", "-s"])

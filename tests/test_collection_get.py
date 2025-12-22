@@ -132,51 +132,64 @@ class TestCollectionGet:
         
         return inserted_ids
 
-    def _run_tags_array_in_nin_suite(self, collection):
-        """Shared assertions for JSON array $in/$nin behavior on tags."""
-        collection.add(
-            ids=["id_overlap", "id_disjoint", "id_missing", "id_null", "id_empty"],
-            documents=["", "", "", "", ""],
-            metadatas=[
-                {"category": "AI", "tags": ["ml", "ai"]},       # overlaps with ["ml", "python"]
-                {"category": "Web", "tags": ["java", "cpp"]},   # disjoint
-                {"category": "Missing"},                       # tags missing
-                {"category": "Null", "tags": None},            # tags explicit null
-                {"category": "Empty", "tags": []},             # tags empty array
-            ],
+    def _test_metadata_array_in_overlap(self, client):
+        """Shared test flow for metadata array $in/$nin using JSON_OVERLAPS."""
+        collection_name = f"test_tags_in_{int(time.time() * 1000)}"
+        collection = client.get_or_create_collection(
+            name=collection_name,
+            embedding_function=pyseekdb.DefaultEmbeddingFunction(),
         )
 
-        # $in with overlap
-        result = collection.get(
-            where={"tags": {"$in": ["ml", "python"]}},
-            include=["metadatas", "ids"],
-        )
-        assert result and "ids" in result
-        assert set(result["ids"]) == {"id_overlap"}
+        try:
+            # Insert cases covering overlap, disjoint, missing, null, empty array
+            collection.add(
+                ids=["id_overlap", "id_disjoint", "id_missing", "id_null", "id_empty"],
+                documents=["", "", "", "", ""],
+                metadatas=[
+                    {"category": "AI", "tags": ["ml", "ai"]},       # overlaps with ["ml", "python"]
+                    {"category": "Web", "tags": ["java", "cpp"]},   # disjoint
+                    {"category": "Missing"},                       # tags missing
+                    {"category": "Null", "tags": None},            # tags explicit null
+                    {"category": "Empty", "tags": []},             # tags empty array
+                ],
+            )
 
-        # $in with disjoint values -> no hits
-        result = collection.get(
-            where={"tags": {"$in": ["ruby"]}},
-            include=["ids"],
-        )
-        assert result and "ids" in result
-        assert len(result["ids"]) == 0
+            # $in with overlap
+            result = collection.get(
+                where={"tags": {"$in": ["ml", "python"]}},
+                include=["metadatas", "ids"],
+            )
+            assert result and "ids" in result
+            assert set(result["ids"]) == {"id_overlap"}
 
-        # $in with empty list -> should return 0 rows
-        result = collection.get(
-            where={"tags": {"$in": []}},
-            include=["ids"],
-        )
-        assert result and "ids" in result
-        assert len(result["ids"]) == 0
+            # $in with disjoint values -> no hits
+            result = collection.get(
+                where={"tags": {"$in": ["ruby"]}},
+                include=["ids"],
+            )
+            assert result and "ids" in result
+            assert len(result["ids"]) == 0
 
-        # $nin should keep disjoint/null/empty, exclude overlap; missing is excluded by JSON behavior
-        result = collection.get(
-            where={"tags": {"$nin": ["ml", "python"]}},
-            include=["ids"],
-        )
-        assert result and "ids" in result
-        assert set(result["ids"]) == {"id_disjoint", "id_null", "id_empty"}
+            # $in with empty list -> should return 0 rows
+            result = collection.get(
+                where={"tags": {"$in": []}},
+                include=["ids"],
+            )
+            assert result and "ids" in result
+            assert len(result["ids"]) == 0
+
+            # $nin should keep disjoint/null/empty, exclude overlap; missing is excluded by JSON behavior
+            result = collection.get(
+                where={"tags": {"$nin": ["ml", "python"]}},
+                include=["ids"],
+            )
+            assert result and "ids" in result
+            assert set(result["ids"]) == {"id_disjoint", "id_null", "id_empty"}
+        finally:
+            try:
+                client.delete_collection(name=collection_name)
+            except Exception as cleanup_error:  # pragma: no cover
+                print(f"Warning: cleanup failed for {collection_name}: {cleanup_error}")
 
     def test_embedded_metadata_array_in_overlap(self):
         """
@@ -192,20 +205,7 @@ class TestCollectionGet:
             path=SEEKDB_PATH,
             database=SEEKDB_DATABASE
         )
-
-        collection_name = f"test_tags_in_{int(time.time() * 1000)}"
-        collection = client.get_or_create_collection(
-            name=collection_name,
-            embedding_function=pyseekdb.DefaultEmbeddingFunction(),
-        )
-
-        try:
-            self._run_tags_array_in_nin_suite(collection)
-        finally:
-            try:
-                client.delete_collection(name=collection_name)
-            except Exception as cleanup_error:  # pragma: no cover
-                print(f"Warning: cleanup failed for {collection_name}: {cleanup_error}")
+        self._test_metadata_array_in_overlap(client)
     
     def test_server_metadata_array_in_overlap(self):
         """
@@ -227,20 +227,7 @@ class TestCollectionGet:
             assert result and result[0].get("test") == 1
         except Exception as exc:
             pytest.fail(f"seekdb server connection failed ({SERVER_HOST}:{SERVER_PORT}): {exc}")
-
-        collection_name = f"test_tags_in_{int(time.time() * 1000)}"
-        collection = client.get_or_create_collection(
-            name=collection_name,
-            embedding_function=pyseekdb.DefaultEmbeddingFunction(),
-        )
-
-        try:
-            self._run_tags_array_in_nin_suite(collection)
-        finally:
-            try:
-                client.delete_collection(name=collection_name)
-            except Exception as cleanup_error:  # pragma: no cover
-                print(f"Warning: cleanup failed for {collection_name}: {cleanup_error}")
+        self._test_metadata_array_in_overlap(client)
     
     def test_oceanbase_metadata_array_in_overlap(self):
         """
@@ -262,20 +249,7 @@ class TestCollectionGet:
             assert result and result[0].get("test") == 1
         except Exception as exc:
             pytest.fail(f"OceanBase connection failed ({OB_HOST}:{OB_PORT}): {exc}")
-
-        collection_name = f"test_tags_in_{int(time.time() * 1000)}"
-        collection = client.get_or_create_collection(
-            name=collection_name,
-            embedding_function=pyseekdb.DefaultEmbeddingFunction(),
-        )
-
-        try:
-            self._run_tags_array_in_nin_suite(collection)
-        finally:
-            try:
-                client.delete_collection(name=collection_name)
-            except Exception as cleanup_error:  # pragma: no cover
-                print(f"Warning: cleanup failed for {collection_name}: {cleanup_error}")
+        self._test_metadata_array_in_overlap(client)
     
     def test_embedded_metadata_array_nin_overlap(self):
         """

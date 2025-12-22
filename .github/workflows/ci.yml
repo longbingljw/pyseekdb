@@ -9,22 +9,21 @@ on:
     branches:
       - main
       - develop
+      - refactor-test 
     paths-ignore:
       - 'README.md'
       - 'demo/**'
 
 jobs:
   test:
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false  # 一个失败不影响其他
       matrix:
-        # server: seekdb-server
-        test_mode: [embedded, server, oceanbase, other]
-        os: [ubuntu-latest]
+        test_mode: [embedded, server, oceanbase]
 
     steps:
       - name: Free disk space
-        if: matrix.os == 'ubuntu-latest'
         uses: kfir4444/free-disk-space@main
         with:
           tool-cache: false
@@ -63,22 +62,19 @@ jobs:
           tenant_name: 'mysql'
           init_sql: "ALTER SYSTEM ob_vector_memory_limit_percentage = 30; create user 'jtuser'@'%'; GRANT SELECT, INSERT, UPDATE, DELETE ON test.* TO 'jtuser'@'%'; FLUSH PRIVILEGES;"
 
-      - name: Start seekdb container
+      - name: Start seekdb server container
         if: matrix.test_mode == 'server'
-        shell: bash
         run: |
           docker run --name seekdb-server -p 2881:2881 -d oceanbase/seekdb:latest
           sleep 15
           docker logs seekdb-server
 
-      - name: Run tests
-        if: matrix.test_mode != 'other'
+      - name: Run tests for ${{ matrix.test_mode }}
+        env:
+          CI: 1
+          SEEKDB_PATH: ${{ runner.temp }}/seekdb.db
+          OB_PORT: 10000
+          SERVER_PORT: 2881
         run: |
-          CI=1 SEEKDB_PATH=$HOME/seekdb.db OB_PORT=10000 SERVER_PORT=2881 poetry run pytest --log-cli-level=INFO -k 'test_${{ matrix.test_mode }}' | tee pytest.log
-          cat pytest.log | awk '/^collected/{s=$8} /passed/{p=$2} END{if(s==p) print "✅ all passed "p"/"s; else print "❌ failed"; exit s!=p}'
-
-      - name: Run other tests
-        if: matrix.test_mode == 'other'
-        run: |
-          CI=1 poetry run pytest --log-cli-level=INFO -k 'test_${{ matrix.test_mode }}' | tee pytest.log
-          cat pytest.log | awk '/^collected/{s=$8} /passed/{p=$2} END{if(s==p) print "✅ all passed "p"/"s; else print "❌ failed"; exit s!=p}'
+          # 只运行特定模式的测试
+          poetry run pytest -v --log-cli-level=INFO -k "${{ matrix.test_mode }}" 

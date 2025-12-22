@@ -244,12 +244,18 @@ class TestClientCreationRefactored:
         assert len(preview_all["ids"]) == 3  # All 3 items
         print(f"\n✅ collection.peek(limit=10) returned {len(preview_all['ids'])} items")
         
-        # Clean up: delete the test collection table
+        # Clean up: delete all test collections
         try:
-            db_client._server._execute(f"DROP TABLE IF EXISTS `{table_name}`")
-            print(f"   Cleaned up test table: {table_name}")
+            db_client.delete_collection(test_collection_name)
+            print(f"   Cleaned up collection: {test_collection_name}")
         except Exception as cleanup_error:
-            print(f"   Warning: Failed to cleanup test table: {cleanup_error}")
+            print(f"   Warning: Failed to cleanup {test_collection_name}: {cleanup_error}")
+        
+        try:
+            db_client.delete_collection(test_collection_name_default)
+            print(f"   Cleaned up collection: {test_collection_name_default}")
+        except Exception as cleanup_error:
+            print(f"   Warning: Failed to cleanup {test_collection_name_default}: {cleanup_error}")
 
 
 if __name__ == "__main__":

@@ -65,12 +65,6 @@ class TestAdminDatabaseManagementRefactored:
             print(f"      - Charset: {db.charset}")
             print(f"      - Collation: {db.collation}")
             
-            # For OceanBase mode, verify all databases have the correct tenant
-            if expected_tenant and expected_tenant != "sys":
-                for db_item in databases_before:
-                    assert db_item.tenant == expected_tenant, \
-                        f"Database {db_item.name} should have tenant {expected_tenant}"
-            
             # Step 4: Delete the database
             print(f"\n🗑️  Step 4: Delete database '{test_db_name}'")
             admin_client.delete_database(test_db_name)

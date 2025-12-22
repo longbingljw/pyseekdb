@@ -132,6 +132,52 @@ class TestCollectionGet:
         
         return inserted_ids
 
+    def _run_tags_array_in_nin_suite(self, collection):
+        """Shared assertions for JSON array $in/$nin behavior on tags."""
+        collection.add(
+            ids=["id_overlap", "id_disjoint", "id_missing", "id_null", "id_empty"],
+            documents=["", "", "", "", ""],
+            metadatas=[
+                {"category": "AI", "tags": ["ml", "ai"]},       # overlaps with ["ml", "python"]
+                {"category": "Web", "tags": ["java", "cpp"]},   # disjoint
+                {"category": "Missing"},                       # tags missing
+                {"category": "Null", "tags": None},            # tags explicit null
+                {"category": "Empty", "tags": []},             # tags empty array
+            ],
+        )
+
+        # $in with overlap
+        result = collection.get(
+            where={"tags": {"$in": ["ml", "python"]}},
+            include=["metadatas", "ids"],
+        )
+        assert result and "ids" in result
+        assert set(result["ids"]) == {"id_overlap"}
+
+        # $in with disjoint values -> no hits
+        result = collection.get(
+            where={"tags": {"$in": ["ruby"]}},
+            include=["ids"],
+        )
+        assert result and "ids" in result
+        assert len(result["ids"]) == 0
+
+        # $in with empty list -> should return 0 rows
+        result = collection.get(
+            where={"tags": {"$in": []}},
+            include=["ids"],
+        )
+        assert result and "ids" in result
+        assert len(result["ids"]) == 0
+
+        # $nin should keep disjoint/null/empty, exclude overlap; missing is excluded by JSON behavior
+        result = collection.get(
+            where={"tags": {"$nin": ["ml", "python"]}},
+            include=["ids"],
+        )
+        assert result and "ids" in result
+        assert set(result["ids"]) == {"id_disjoint", "id_null", "id_empty"}
+
     def test_embedded_metadata_array_in_overlap(self):
         """
         Regression test for JSON array $in operator with embedded client.
@@ -154,49 +200,7 @@ class TestCollectionGet:
         )
 
         try:
-            collection.add(
-                ids=["id_overlap", "id_disjoint", "id_missing", "id_null", "id_empty"],
-                documents=["", "", "", "", ""],
-                metadatas=[
-                    {"category": "AI", "tags": ["ml", "ai"]},       # overlaps with ["ml", "python"]
-                    {"category": "Web", "tags": ["java", "cpp"]},   # disjoint
-                    {"category": "Missing"},                       # tags missing
-                    {"category": "Null", "tags": None},            # tags explicit null
-                    {"category": "Empty", "tags": []},             # tags empty array
-                ],
-            )
-
-            # $in with overlap
-            result = collection.get(
-                where={"tags": {"$in": ["ml", "python"]}},
-                include=["metadatas", "ids"],
-            )
-            assert result and "ids" in result
-            assert set(result["ids"]) == {"id_overlap"}
-
-            # $in with disjoint values -> no hits
-            result = collection.get(
-                where={"tags": {"$in": ["ruby"]}},
-                include=["ids"],
-            )
-            assert result and "ids" in result
-            assert len(result["ids"]) == 0
-
-            # $in with empty list -> should return 0 rows
-            result = collection.get(
-                where={"tags": {"$in": []}},
-                include=["ids"],
-            )
-            assert result and "ids" in result
-            assert len(result["ids"]) == 0
-
-            # $nin should keep disjoint/null/empty, exclude overlap; missing is excluded by JSON behavior
-            result = collection.get(
-                where={"tags": {"$nin": ["ml", "python"]}},
-                include=["ids"],
-            )
-            assert result and "ids" in result
-            assert set(result["ids"]) == {"id_disjoint", "id_null", "id_empty"}
+            self._run_tags_array_in_nin_suite(collection)
         finally:
             try:
                 client.delete_collection(name=collection_name)
@@ -231,49 +235,7 @@ class TestCollectionGet:
         )
 
         try:
-            collection.add(
-                ids=["id_overlap", "id_disjoint", "id_missing", "id_null", "id_empty"],
-                documents=["", "", "", "", ""],
-                metadatas=[
-                    {"category": "AI", "tags": ["ml", "ai"]},       # overlaps with ["ml", "python"]
-                    {"category": "Web", "tags": ["java", "cpp"]},   # disjoint
-                    {"category": "Missing"},                       # tags missing
-                    {"category": "Null", "tags": None},            # tags explicit null
-                    {"category": "Empty", "tags": []},             # tags empty array
-                ],
-            )
-
-            # $in with overlap
-            result = collection.get(
-                where={"tags": {"$in": ["ml", "python"]}},
-                include=["metadatas", "ids"],
-            )
-            assert result and "ids" in result
-            assert set(result["ids"]) == {"id_overlap"}
-
-            # $in with disjoint values -> no hits
-            result = collection.get(
-                where={"tags": {"$in": ["ruby"]}},
-                include=["ids"],
-            )
-            assert result and "ids" in result
-            assert len(result["ids"]) == 0
-
-            # $in with empty list -> should return 0 rows
-            result = collection.get(
-                where={"tags": {"$in": []}},
-                include=["ids"],
-            )
-            assert result and "ids" in result
-            assert len(result["ids"]) == 0
-
-            # $nin should keep disjoint/null/empty, exclude overlap; missing is excluded by JSON behavior
-            result = collection.get(
-                where={"tags": {"$nin": ["ml", "python"]}},
-                include=["ids"],
-            )
-            assert result and "ids" in result
-            assert set(result["ids"]) == {"id_disjoint", "id_null", "id_empty"}
+            self._run_tags_array_in_nin_suite(collection)
         finally:
             try:
                 client.delete_collection(name=collection_name)
@@ -308,49 +270,7 @@ class TestCollectionGet:
         )
 
         try:
-            collection.add(
-                ids=["id_overlap", "id_disjoint", "id_missing", "id_null", "id_empty"],
-                documents=["", "", "", "", ""],
-                metadatas=[
-                    {"category": "AI", "tags": ["ml", "ai"]},       # overlaps with ["ml", "python"]
-                    {"category": "Web", "tags": ["java", "cpp"]},   # disjoint
-                    {"category": "Missing"},                       # tags missing
-                    {"category": "Null", "tags": None},            # tags explicit null
-                    {"category": "Empty", "tags": []},             # tags empty array
-                ],
-            )
-
-            # $in with overlap
-            result = collection.get(
-                where={"tags": {"$in": ["ml", "python"]}},
-                include=["metadatas", "ids"],
-            )
-            assert result and "ids" in result
-            assert set(result["ids"]) == {"id_overlap"}
-
-            # $in with disjoint values -> no hits
-            result = collection.get(
-                where={"tags": {"$in": ["ruby"]}},
-                include=["ids"],
-            )
-            assert result and "ids" in result
-            assert len(result["ids"]) == 0
-
-            # $in with empty list -> should return 0 rows
-            result = collection.get(
-                where={"tags": {"$in": []}},
-                include=["ids"],
-            )
-            assert result and "ids" in result
-            assert len(result["ids"]) == 0
-
-            # $nin should keep disjoint/null/empty, exclude overlap; missing is excluded by JSON behavior
-            result = collection.get(
-                where={"tags": {"$nin": ["ml", "python"]}},
-                include=["ids"],
-            )
-            assert result and "ids" in result
-            assert set(result["ids"]) == {"id_disjoint", "id_null", "id_empty"}
+            self._run_tags_array_in_nin_suite(collection)
         finally:
             try:
                 client.delete_collection(name=collection_name)

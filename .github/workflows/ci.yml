@@ -15,10 +15,33 @@ on:
       - 'demo/**'
 
 jobs:
-  test:
+  unit-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v3
+        with:
+          python-version: '3.11'
+
+      - name: Install Poetry
+        run: |
+          pip install poetry
+
+      - name: Install dependencies
+        run: |
+          poetry install
+
+      - name: Run unit tests
+        run: |
+          poetry run pytest tests/unit_tests/ -v --log-cli-level=INFO
+
+  integration-test:
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false  # 一个失败不影响其他
+      fail-fast: false  # Allow other jobs to continue if one fails
       matrix:
         test_mode: [embedded, server, oceanbase]
 
@@ -69,12 +92,12 @@ jobs:
           sleep 15
           docker logs seekdb-server
 
-      - name: Run tests for ${{ matrix.test_mode }}
+      - name: Run integration tests for ${{ matrix.test_mode }}
         env:
           CI: 1
           SEEKDB_PATH: ${{ runner.temp }}/seekdb.db
           OB_PORT: 10000
           SERVER_PORT: 2881
         run: |
-          # 只运行特定模式的测试
-          poetry run pytest -v --log-cli-level=INFO -k "${{ matrix.test_mode }}" 
+          # Run integration tests filtered by test mode
+          poetry run pytest tests/integration_tests/ -v --log-cli-level=INFO -k "${{ matrix.test_mode }}" 

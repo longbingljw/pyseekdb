@@ -91,6 +91,57 @@ def create_oceanbase_client():
     return client
 
 
+# ==================== AdminClient Factory Functions ====================
+def create_embedded_admin_client():
+    """Create an embedded admin client instance."""
+    try:
+        import pylibseekdb  # noqa: F401
+    except ImportError:
+        pytest.skip("seekdb embedded package is not installed")
+    
+    return pyseekdb.AdminClient(path=SEEKDB_PATH)
+
+
+def create_server_admin_client():
+    """Create a server admin client instance."""
+    admin = pyseekdb.AdminClient(
+        host=SERVER_HOST,
+        port=SERVER_PORT,
+        tenant="sys",
+        user=SERVER_USER,
+        password=SERVER_PASSWORD
+    )
+    
+    # Test connection
+    try:
+        result = admin._server._execute("SELECT 1 as test")
+        assert result and result[0].get("test") == 1
+    except Exception as exc:
+        pytest.fail(f"seekdb server connection failed ({SERVER_HOST}:{SERVER_PORT}): {exc}")
+    
+    return admin
+
+
+def create_oceanbase_admin_client():
+    """Create an OceanBase admin client instance."""
+    admin = pyseekdb.AdminClient(
+        host=OB_HOST,
+        port=OB_PORT,
+        tenant=OB_TENANT,
+        user=OB_USER,
+        password=OB_PASSWORD
+    )
+    
+    # Test connection
+    try:
+        result = admin._server._execute("SELECT 1 as test")
+        assert result and result[0].get("test") == 1
+    except Exception as exc:
+        pytest.fail(f"OceanBase connection failed ({OB_HOST}:{OB_PORT}): {exc}")
+    
+    return admin
+
+
 # ==================== Parameterized Client Fixtures ====================
 @pytest.fixture(params=['embedded', 'server', 'oceanbase'])
 def db_client(request):
@@ -158,6 +209,81 @@ def server_client():
 def oceanbase_client():
     """Fixture for OceanBase client only."""
     client = create_oceanbase_client()
+    yield client
+    try:
+        if hasattr(client, 'close'):
+            client.close()
+    except:
+        pass
+
+
+# ==================== Parameterized AdminClient Fixtures ====================
+@pytest.fixture(params=['embedded', 'server', 'oceanbase'])
+def admin_client(request):
+    """
+    Parameterized fixture that provides admin clients for all three modes.
+    
+    This fixture automatically creates test variants for embedded, server, and oceanbase modes.
+    
+    Usage:
+        def test_my_admin_feature(admin_client):
+            admin_client.create_database("test_db")
+            # test logic here
+    
+    This will automatically run 3 times: once for each client mode.
+    Generated test names will be:
+        - test_my_admin_feature[embedded]
+        - test_my_admin_feature[server]
+        - test_my_admin_feature[oceanbase]
+    """
+    mode = request.param
+    
+    if mode == 'embedded':
+        client = create_embedded_admin_client()
+    elif mode == 'server':
+        client = create_server_admin_client()
+    elif mode == 'oceanbase':
+        client = create_oceanbase_admin_client()
+    else:
+        raise ValueError(f"Unknown admin client mode: {mode}")
+    
+    yield client
+    
+    try:
+        if hasattr(client, 'close'):
+            client.close()
+    except:
+        pass
+
+
+@pytest.fixture
+def embedded_admin_client():
+    """Fixture for embedded admin client only."""
+    client = create_embedded_admin_client()
+    yield client
+    try:
+        if hasattr(client, 'close'):
+            client.close()
+    except:
+        pass
+
+
+@pytest.fixture
+def server_admin_client():
+    """Fixture for server admin client only."""
+    client = create_server_admin_client()
+    yield client
+    try:
+        if hasattr(client, 'close'):
+            client.close()
+    except:
+        pass
+
+
+@pytest.fixture
+def oceanbase_admin_client():
+    """Fixture for OceanBase admin client only."""
+    client = create_oceanbase_admin_client()
     yield client
     try:
         if hasattr(client, 'close'):

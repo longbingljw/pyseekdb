@@ -130,6 +130,7 @@ class FilterBuilder:
                         if not isinstance(op_value, (list, tuple)):
                             op_value = [op_value]
                         if len(op_value) == 0:
+                            clauses.append("FALSE")  # empty $in should match nothing
                             continue
                         
                         # Use single JSON_OVERLAPS (supports both scalar and array fields)
@@ -144,7 +145,7 @@ class FilterBuilder:
                         if not isinstance(op_value, (list, tuple)):
                             op_value = [op_value]
                         if len(op_value) == 0:
-                            continue
+                            continue  # empty $nin matches everything
                         
                         # Use single JSON_OVERLAPS (supports both scalar and array fields)
                         json_array = json.dumps(list(op_value))

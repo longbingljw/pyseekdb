@@ -45,7 +45,10 @@ class TestCollectionHybridSearchWithBuilderRefactored:
             collection = client.create_collection(name=collection_name)
         return collection, collection.dimension
 
-    def _generate_query_vector(self, dimension: int, base_vector: List[float] = [1.0, 2.0, 3.0]) -> List[float]:
+    def _generate_query_vector(self, dimension: int, base_vector: List[float] = None) -> List[float]:
+        if base_vector is None:
+            base_vector = [1.0, 2.0, 3.0]
+        
         if dimension <= len(base_vector):
             return base_vector[:dimension]
         extended = base_vector * ((dimension // len(base_vector)) + 1)

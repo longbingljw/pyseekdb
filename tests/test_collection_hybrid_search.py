@@ -1,55 +1,23 @@
 """
-Collection hybrid search tests - testing collection.hybrid_search() interface for all three modes
-Supports configuring connection parameters via environment variables
+Collection hybrid search tests - REFACTORED using db_client fixture
+Demonstrates how to eliminate 67% code duplication using parameterized fixtures
 """
 import pytest
-import sys
-import os
 import time
 import json
 import uuid
-from pathlib import Path
 from typing import List
-
-# Add project path
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root))
 
 import pyseekdb
 
 
-# ==================== Environment Variable Configuration ====================
-# Embedded mode
-SEEKDB_PATH = os.environ.get('SEEKDB_PATH', os.path.join(project_root, "seekdb.db"))
-SEEKDB_DATABASE = os.environ.get('SEEKDB_DATABASE', 'test')
-
-# Server mode
-SERVER_HOST = os.environ.get('SERVER_HOST', '127.0.0.1')
-SERVER_PORT = int(os.environ.get('SERVER_PORT', '2881'))
-SERVER_DATABASE = os.environ.get('SERVER_DATABASE', 'test')
-SERVER_USER = os.environ.get('SERVER_USER', 'root')
-SERVER_PASSWORD = os.environ.get('SERVER_PASSWORD', '')
-
-# OceanBase mode
-OB_HOST = os.environ.get('OB_HOST', 'localhost')
-OB_PORT = int(os.environ.get('OB_PORT', '11202'))
-OB_TENANT = os.environ.get('OB_TENANT', 'mysql')
-OB_DATABASE = os.environ.get('OB_DATABASE', 'test')
-OB_USER = os.environ.get('OB_USER', 'root')
-OB_PASSWORD = os.environ.get('OB_PASSWORD', '')
-
-
-class TestCollectionHybridSearch:
-    """Test collection.hybrid_search() interface for all three modes"""
+class TestCollectionHybridSearchRefactored:
+    """Test collection.hybrid_search() interface using parameterized db_client fixture"""
     
     def _create_test_collection(self, client, collection_name: str, dimension: int = None):
         """Helper method to create a test collection"""
-        # Use client.create_collection to create the collection
-        # If dimension is not provided, use default embedding function (384 dim)
-        # If dimension is provided, set embedding_function=None to use the specified dimension
         from pyseekdb import HNSWConfiguration
         if dimension is not None:
-            # Use specified dimension without embedding function
             config = HNSWConfiguration(dimension=dimension, distance='l2')
             collection = client.create_collection(
                 name=collection_name,
@@ -57,41 +25,21 @@ class TestCollectionHybridSearch:
                 embedding_function=None
             )
         else:
-            # Use default configuration and embedding function (auto-calculates dimension)
-            collection = client.create_collection(
-                name=collection_name
-            )
-        # Return both collection and actual dimension
+            collection = client.create_collection(name=collection_name)
         return collection, collection.dimension
     
     def _generate_query_vector(self, dimension: int, base_vector: List[float] = [1.0, 2.0, 3.0]) -> List[float]:
-        """Generate a query vector with the correct dimension
-        
-        Args:
-            dimension: Target dimension
-            base_vector: Base vector pattern (default: [1.0, 2.0, 3.0])
-            
-        Returns:
-            Vector with the specified dimension
-        """
+        """Generate a query vector with the correct dimension"""
         if dimension <= len(base_vector):
             return base_vector[:dimension]
         else:
-            # Extend if dimension is larger (repeat pattern)
             extended = base_vector * ((dimension // len(base_vector)) + 1)
             return extended[:dimension]
     
     def _insert_test_data(self, client, collection_name: str, dimension: int = 3):
-        """Helper method to insert test data via SQL and return inserted IDs
-        
-        Args:
-            client: Client instance
-            collection_name: Collection name
-            dimension: Actual dimension of the collection (used to generate vectors)
-        """
+        """Helper method to insert test data via SQL and return inserted IDs"""
         table_name = f"c$v1${collection_name}"
         
-        # Base vectors (3D) - will be extended or truncated to match actual dimension
         base_vectors = [
             [1.0, 2.0, 3.0],
             [2.0, 3.0, 4.0],
@@ -103,8 +51,6 @@ class TestCollectionHybridSearch:
             [1.4, 2.4, 3.4]
         ]
         
-        # Insert test data with vectors, documents, and metadata
-        # Data designed for hybrid search testing
         test_data = [
             {
                 "document": "Machine learning is a subset of artificial intelligence",
@@ -150,30 +96,21 @@ class TestCollectionHybridSearch:
         
         inserted_ids = []
         for data in test_data:
-            # Generate UUID for _id (use string format directly)
             id_str = str(uuid.uuid4())
             inserted_ids.append(id_str)
-            # Escape single quotes in ID
             id_str_escaped = id_str.replace("'", "''")
             
-            # Generate vector with correct dimension
             base_vec = data["base_vector"]
             if dimension <= len(base_vec):
-                # Truncate if dimension is smaller
                 embedding = base_vec[:dimension]
             else:
-                # Extend if dimension is larger (repeat pattern)
                 embedding = base_vec * ((dimension // len(base_vec)) + 1)
                 embedding = embedding[:dimension]
             
-            # Convert vector to string format: [1.0,2.0,3.0]
             vector_str = "[" + ",".join(map(str, embedding)) + "]"
-            # Convert metadata to JSON string
             metadata_str = json.dumps(data["metadata"], ensure_ascii=False).replace("'", "\\'")
-            # Escape single quotes in document
             document_str = data["document"].replace("'", "\\'")
             
-            # Use CAST to convert string to binary for varbinary(512) field
             sql = f"""INSERT INTO `{table_name}` (_id, document, embedding, metadata) 
                      VALUES (CAST('{id_str_escaped}' AS BINARY), '{document_str}', '{vector_str}', '{metadata_str}')"""
             client._server._execute(sql)
@@ -181,1266 +118,314 @@ class TestCollectionHybridSearch:
         print(f"   Inserted {len(test_data)} test records (dimension={dimension})")
         return inserted_ids
     
-    def _cleanup_collection(self, client, collection_name: str):
-        """Helper method to cleanup test collection"""
-        table_name = f"c$v1${collection_name}"
-        try:
-            client._server._execute(f"DROP TABLE IF EXISTS `{table_name}`")
-            print(f"   Cleaned up test table: {table_name}")
-        except Exception as cleanup_error:
-            print(f"   Warning: Failed to cleanup test table: {cleanup_error}")
-    
-    def test_oceanbase_hybrid_search_full_text_only(self):
-        """Test hybrid_search with only full-text search (query)"""
-        # Create OceanBase client
-        client = pyseekdb.Client(
-            host=OB_HOST,
-            port=OB_PORT,
-            tenant=OB_TENANT,
-            database=OB_DATABASE,
-            user=OB_USER,
-            password=OB_PASSWORD
+    def test_hybrid_search_full_text_only(self, db_client):
+        """
+        Test hybrid_search with only full-text search (query).
+        
+        Automatically runs for: embedded, server, oceanbase
+        """
+        collection_name = f"test_hybrid_search_ft_{int(time.time() * 1000)}"
+        collection, actual_dimension = self._create_test_collection(db_client, collection_name)
+        
+        self._insert_test_data(db_client, collection_name, dimension=actual_dimension)
+        time.sleep(1)
+        
+        # Test 1: Full-text search only
+        print(f"\n✅ Testing hybrid_search with full-text search only")
+        results = collection.hybrid_search(
+            query={
+                "where_document": {
+                    "$contains": "machine learning"
+                }
+            },
+            n_results=5,
+            include=["documents", "metadatas"]
         )
         
-        assert client is not None
-        assert hasattr(client, '_server')
-        assert isinstance(client._server, pyseekdb.RemoteServerClient)
+        assert results is not None
+        assert "ids" in results
+        assert "documents" in results
+        assert "metadatas" in results
+        assert len(results["ids"]) > 0
+        assert len(results["ids"][0]) > 0
+        print(f"   Found {len(results['ids'][0])} results")
         
-        # Test connection
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result is not None
-        except Exception as e:
-            pytest.fail(f"OceanBase connection failed ({OB_HOST}:{OB_PORT}): {e}")
-        
-        # Create test collection
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            # Insert test data
-            self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            
-            # Wait a bit for indexes to be ready
-            time.sleep(1)
-            
-            # Test 1: Full-text search only
-            print(f"\n✅ Testing hybrid_search with full-text search only")
-            results = collection.hybrid_search(
-                query={
-                    "where_document": {
-                        "$contains": "machine learning"
-                    }
-                },
-                n_results=5,
-                include=["documents", "metadatas"]
-            )
-            
-            assert results is not None
-            assert "ids" in results
-            assert "documents" in results
-            assert "metadatas" in results
-            assert len(results["ids"]) > 0
-            assert len(results["ids"][0]) > 0
-            print(f"   Found {len(results['ids'][0])} results")
-            
-            # Verify results contain "machine learning"
-            for doc in results["documents"][0]:
-                if doc:
-                    assert "machine" in doc.lower() or "learning" in doc.lower()
+        # Verify results contain "machine learning"
+        for doc in results["documents"][0]:
+            if doc:
+                assert "machine" in doc.lower() or "learning" in doc.lower()
 
-            # Test 1b: Full-text search with $not_contains
-            print(f"   Testing hybrid_search with $not_contains filter")
-            forbidden_phrase = "machine learning"
-            results_not = collection.hybrid_search(
-                query={
-                    "where_document": {
-                        "$not_contains": forbidden_phrase
-                    }
-                },
-                n_results=5,
-                include=["documents", "metadatas"]
-            )
+        # Test 1b: Full-text search with $not_contains
+        print(f"   Testing hybrid_search with $not_contains filter")
+        forbidden_phrase = "machine learning"
+        results_not = collection.hybrid_search(
+            query={
+                "where_document": {
+                    "$not_contains": forbidden_phrase
+                }
+            },
+            n_results=5,
+            include=["documents", "metadatas"]
+        )
 
-            assert results_not is not None
-            assert "documents" in results_not
-            docs_not = results_not["documents"][0] if results_not.get("documents") else []
-            for doc in docs_not:
-                if doc:
-                    assert forbidden_phrase not in doc.lower()
-            
-        finally:
-            # Cleanup
-            self._cleanup_collection(client, collection_name)
+        assert results_not is not None
+        assert "documents" in results_not
+        docs_not = results_not["documents"][0] if results_not.get("documents") else []
+        for doc in docs_not:
+            if doc:
+                assert forbidden_phrase not in doc.lower()
     
-    def test_oceanbase_hybrid_search_vector_only(self):
-        """Test hybrid_search with only vector search (knn)"""
-        # Create OceanBase client
-        client = pyseekdb.Client(
-            host=OB_HOST,
-            port=OB_PORT,
-            tenant=OB_TENANT,
-            database=OB_DATABASE,
-            user=OB_USER,
-            password=OB_PASSWORD
+    def test_hybrid_search_vector_only(self, db_client):
+        """
+        Test hybrid_search with only vector search (knn).
+        
+        Automatically runs for: embedded, server, oceanbase
+        """
+        collection_name = f"test_hybrid_search_vec_{int(time.time() * 1000)}"
+        collection, actual_dimension = self._create_test_collection(db_client, collection_name)
+        
+        self._insert_test_data(db_client, collection_name, dimension=actual_dimension)
+        time.sleep(1)
+        
+        # Test: Vector search only
+        print(f"\n✅ Testing hybrid_search with vector search only")
+        results = collection.hybrid_search(
+            knn={
+                "query_embeddings": self._generate_query_vector(actual_dimension),
+                "n_results": 5
+            },
+            n_results=5,
+            include=["documents", "metadatas", "embeddings"]
         )
         
-        # Test connection
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result is not None
-        except Exception as e:
-            pytest.fail(f"OceanBase connection failed ({OB_HOST}:{OB_PORT}): {e}")
+        assert results is not None
+        assert "ids" in results
+        assert "distances" in results
+        assert len(results["ids"]) > 0
+        assert len(results["ids"][0]) > 0
+        print(f"   Found {len(results['ids'][0])} results")
         
-        # Create test collection
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            # Insert test data
-            self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            
-            # Wait a bit for indexes to be ready
-            time.sleep(1)
-            
-            # Test 2: Vector search only
-            print(f"\n✅ Testing hybrid_search with vector search only")
-            results = collection.hybrid_search(
-                knn={
-                    "query_embeddings": self._generate_query_vector(actual_dimension),
-                    "n_results": 5
-                },
-                n_results=5,
-                include=["documents", "metadatas", "embeddings"]
-            )
-            
-            assert results is not None
-            assert "ids" in results
-            assert "distances" in results
-            assert len(results["ids"]) > 0
-            assert len(results["ids"][0]) > 0
-            print(f"   Found {len(results['ids'][0])} results")
-            
-            # Verify distances are reasonable
-            # Note: APPROXIMATE ordering may not be perfectly sorted, so we only check
-            # that distances are non-negative and reasonable
-            distances = results["distances"][0]
-            assert len(distances) > 0
-            # All distances should be non-negative
-            for dist in distances:
-                assert dist >= 0, f"Distance should be non-negative, got {dist}"
-            # At least one distance should be relatively small (close match)
-            min_distance = min(distances)
-            assert min_distance < 10.0, f"At least one distance should be reasonable, got min={min_distance}"
-            
-        finally:
-            # Cleanup
-            self._cleanup_collection(client, collection_name)
+        # Verify distances are reasonable
+        distances = results["distances"][0]
+        assert len(distances) > 0
+        for dist in distances:
+            assert dist >= 0, f"Distance should be non-negative, got {dist}"
+        min_distance = min(distances)
+        assert min_distance < 10.0, f"At least one distance should be reasonable, got min={min_distance}"
     
-    def test_oceanbase_hybrid_search_combined(self):
-        """Test hybrid_search with both full-text and vector search"""
-        # Create OceanBase client
-        client = pyseekdb.Client(
-            host=OB_HOST,
-            port=OB_PORT,
-            tenant=OB_TENANT,
-            database=OB_DATABASE,
-            user=OB_USER,
-            password=OB_PASSWORD
+    def test_hybrid_search_combined(self, db_client):
+        """
+        Test hybrid_search with both full-text and vector search.
+        
+        Automatically runs for: embedded, server, oceanbase
+        """
+        collection_name = f"test_hybrid_search_comb_{int(time.time() * 1000)}"
+        collection, actual_dimension = self._create_test_collection(db_client, collection_name)
+        
+        self._insert_test_data(db_client, collection_name, dimension=actual_dimension)
+        time.sleep(1)
+        
+        # Test: Combined full-text and vector search
+        print(f"\n✅ Testing hybrid_search with both full-text and vector search")
+        results = collection.hybrid_search(
+            query={
+                "where_document": {
+                    "$contains": "machine learning"
+                },
+                "n_results": 10,
+                "boost": 0.4
+            },
+            knn={
+                "query_embeddings": self._generate_query_vector(actual_dimension),
+                "n_results": 10,
+                "boost": 1.6
+            },
+            rank={
+                "rrf": {
+                    "rank_window_size": 60,
+                    "rank_constant": 60
+                }
+            },
+            n_results=5,
+            include=["documents", "metadatas", "embeddings"]
         )
         
-        # Test connection
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result is not None
-        except Exception as e:
-            pytest.fail(f"OceanBase connection failed ({OB_HOST}:{OB_PORT}): {e}")
-        
-        # Create test collection
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            # Insert test data
-            self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            
-            # Wait a bit for indexes to be ready
-            time.sleep(1)
-            
-            # Test 3: Combined full-text and vector search
-            print(f"\n✅ Testing hybrid_search with both full-text and vector search")
-            results = collection.hybrid_search(
-                query={
-                    "where_document": {
-                        "$contains": "machine learning"
-                    },
-                    "n_results": 10,
-                    "boost": 0.4
-                },
-                knn={
-                    "query_embeddings": self._generate_query_vector(actual_dimension),
-                    "n_results": 10,
-                    "boost": 1.6
-                },
-                rank={
-                    "rrf": {
-                        "rank_window_size": 60,
-                        "rank_constant": 60
-                    }
-                },
-                n_results=5,
-                include=["documents", "metadatas", "embeddings"]
-            )
-            
-            assert results is not None
-            assert "ids" in results
-            assert len(results["ids"]) > 0
-            assert len(results["ids"][0]) > 0
-            print(f"   Found {len(results['ids'][0])} results after RRF ranking")
-            
-        finally:
-            # Cleanup
-            self._cleanup_collection(client, collection_name)
+        assert results is not None
+        assert "ids" in results
+        assert len(results["ids"]) > 0
+        assert len(results["ids"][0]) > 0
+        print(f"   Found {len(results['ids'][0])} results after RRF ranking")
     
-    def test_oceanbase_hybrid_search_with_metadata_filter(self):
-        """Test hybrid_search with metadata filters"""
-        # Create OceanBase client
-        client = pyseekdb.Client(
-            host=OB_HOST,
-            port=OB_PORT,
-            tenant=OB_TENANT,
-            database=OB_DATABASE,
-            user=OB_USER,
-            password=OB_PASSWORD
+    def test_hybrid_search_with_metadata_filter(self, db_client):
+        """
+        Test hybrid_search with metadata filters.
+        
+        Automatically runs for: embedded, server, oceanbase
+        """
+        collection_name = f"test_hybrid_search_meta_{int(time.time() * 1000)}"
+        collection, actual_dimension = self._create_test_collection(db_client, collection_name)
+        
+        self._insert_test_data(db_client, collection_name, dimension=actual_dimension)
+        time.sleep(1)
+        
+        # Test: Hybrid search with metadata filter
+        print(f"\n✅ Testing hybrid_search with metadata filter")
+        results = collection.hybrid_search(
+            query={
+                "where_document": {
+                    "$contains": "machine"
+                },
+                "where": {
+                    "$and": [
+                        {"category": {"$eq": "AI"}},
+                        {"page": {"$gte": 1}},
+                        {"page": {"$lte": 5}}
+                    ]
+                },
+                "n_results": 10
+            },
+            knn={
+                "query_embeddings": self._generate_query_vector(actual_dimension),
+                "where": {
+                    "$and": [
+                        {"category": {"$eq": "AI"}},
+                        {"score": {"$gte": 90}}
+                    ]
+                },
+                "n_results": 10
+            },
+            n_results=5,
+            include=["documents", "metadatas"]
         )
         
-        # Test connection
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result is not None
-        except Exception as e:
-            pytest.fail(f"OceanBase connection failed ({OB_HOST}:{OB_PORT}): {e}")
+        assert results is not None
+        assert len(results["ids"]) > 0
+        assert len(results["ids"][0]) > 0
+        print(f"   Found {len(results['ids'][0])} results with metadata filters")
         
-        # Create test collection
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            # Insert test data
-            self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            
-            # Wait a bit for indexes to be ready
-            time.sleep(1)
-            
-            # Test 4: Hybrid search with metadata filter
-            print(f"\n✅ Testing hybrid_search with metadata filter")
-            results = collection.hybrid_search(
-                query={
-                    "where_document": {
-                        "$contains": "machine"
-                    },
-                    "where": {
-                        "$and": [
-                            {"category": {"$eq": "AI"}},
-                            {"page": {"$gte": 1}},
-                            {"page": {"$lte": 5}}
-                        ]
-                    },
-                    "n_results": 10
-                },
-                knn={
-                    "query_embeddings": self._generate_query_vector(actual_dimension),
-                    "where": {
-                        "$and": [
-                            {"category": {"$eq": "AI"}},
-                            {"score": {"$gte": 90}}
-                        ]
-                    },
-                    "n_results": 10
-                },
-                n_results=5,
-                include=["documents", "metadatas"]
-            )
-            
-            assert results is not None
-            assert len(results["ids"]) > 0
-            assert len(results["ids"][0]) > 0
-            print(f"   Found {len(results['ids'][0])} results with metadata filters")
-            
-            # Verify metadata filters are applied
-            # Note: In hybrid search with RRF ranking, results may include records from both
-            # full-text and vector search, so we check that all results meet at least one set of filters
-            for metadata in results["metadatas"][0]:
-                if metadata:
-                    # Results should have category "AI" (common to both query and knn filters)
-                    assert metadata.get("category") == "AI"
-                    # Page filter may not be strictly applied in hybrid search results
-                    # due to RRF ranking combining results from both queries
-            
-        finally:
-            # Cleanup
-            self._cleanup_collection(client, collection_name)
+        # Verify metadata filters are applied
+        for metadata in results["metadatas"][0]:
+            if metadata:
+                assert metadata.get("category") == "AI"
     
-    def test_oceanbase_hybrid_search_with_logical_operators(self):
-        """Test hybrid_search with logical operators in metadata filters"""
-        # Create OceanBase client
-        client = pyseekdb.Client(
-            host=OB_HOST,
-            port=OB_PORT,
-            tenant=OB_TENANT,
-            database=OB_DATABASE,
-            user=OB_USER,
-            password=OB_PASSWORD
+    def test_hybrid_search_with_logical_operators(self, db_client):
+        """
+        Test hybrid_search with logical operators in metadata filters.
+        
+        Automatically runs for: embedded, server, oceanbase
+        """
+        collection_name = f"test_hybrid_search_logic_{int(time.time() * 1000)}"
+        collection, actual_dimension = self._create_test_collection(db_client, collection_name)
+        
+        self._insert_test_data(db_client, collection_name, dimension=actual_dimension)
+        time.sleep(1)
+        
+        # Test: Hybrid search with logical operators ($or, $in)
+        print(f"\n✅ Testing hybrid_search with logical operators")
+        results = collection.hybrid_search(
+            query={
+                "where_document": {
+                    "$and": [
+                        {"$contains": "machine"},
+                        {"$contains": "learning"}
+                    ]
+                },
+                "where": {
+                    "$or": [
+                        {"tag": {"$eq": "ml"}},
+                        {"tag": {"$eq": "python"}}
+                    ]
+                },
+                "n_results": 10
+            },
+            knn={
+                "query_embeddings": self._generate_query_vector(actual_dimension),
+                "where": {
+                    "tag": {"$in": ["ml", "python"]}
+                },
+                "n_results": 10
+            },
+            rank={"rrf": {}},
+            n_results=5,
+            include=["documents", "metadatas"]
         )
         
-        # Test connection
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result is not None
-        except Exception as e:
-            pytest.fail(f"OceanBase connection failed ({OB_HOST}:{OB_PORT}): {e}")
+        assert results is not None
+        assert len(results["ids"]) > 0
+        assert len(results["ids"][0]) > 0
+        print(f"   Found {len(results['ids'][0])} results with logical operators")
         
-        # Create test collection
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            # Insert test data
-            self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            
-            # Wait a bit for indexes to be ready
-            time.sleep(1)
-            
-            # Test 5: Hybrid search with logical operators ($or, $in)
-            print(f"\n✅ Testing hybrid_search with logical operators")
-            results = collection.hybrid_search(
-                query={
-                    "where_document": {
-                        "$and": [
-                            {"$contains": "machine"},
-                            {"$contains": "learning"}
-                        ]
-                    },
-                    "where": {
-                        "$or": [
-                            {"tag": {"$eq": "ml"}},
-                            {"tag": {"$eq": "python"}}
-                        ]
-                    },
-                    "n_results": 10
-                },
-                knn={
-                    "query_embeddings": self._generate_query_vector(actual_dimension),
-                    "where": {
-                        "tag": {"$in": ["ml", "python"]}
-                    },
-                    "n_results": 10
-                },
-                rank={"rrf": {}},
-                n_results=5,
-                include=["documents", "metadatas"]
-            )
-            
-            assert results is not None
-            assert len(results["ids"]) > 0
-            assert len(results["ids"][0]) > 0
-            print(f"   Found {len(results['ids'][0])} results with logical operators")
-            
-            # Verify logical operators are applied
-            for metadata in results["metadatas"][0]:
-                if metadata and "tag" in metadata:
-                    assert metadata["tag"] in ["ml", "python"]
-            
-        finally:
-            # Cleanup
-            self._cleanup_collection(client, collection_name)
+        # Verify logical operators are applied
+        for metadata in results["metadatas"][0]:
+            if metadata and "tag" in metadata:
+                assert metadata["tag"] in ["ml", "python"]
     
-    def test_oceanbase_hybrid_search_scalar_in_nin_and_id(self):
-        """Test hybrid_search scalar filters with $in/$nin and #id support"""
-        client = pyseekdb.Client(
-            host=OB_HOST,
-            port=OB_PORT,
-            tenant=OB_TENANT,
-            database=OB_DATABASE,
-            user=OB_USER,
-            password=OB_PASSWORD
+    def test_hybrid_search_scalar_in_nin_and_id(self, db_client):
+        """
+        Test hybrid_search scalar filters with $in/$nin and #id support.
+        
+        Automatically runs for: embedded, server, oceanbase
+        """
+        collection_name = f"test_hybrid_search_scalar_{int(time.time() * 1000)}"
+        collection, actual_dimension = self._create_test_collection(db_client, collection_name)
+        
+        inserted_ids = self._insert_test_data(db_client, collection_name, dimension=actual_dimension)
+        time.sleep(1)
+        
+        # Test $in operator
+        print(f"\n✅ Testing hybrid_search with $in operator")
+        results_in = collection.hybrid_search(
+            query={
+                "where": {
+                    "tag": {"$in": ["ml", "python"]}
+                },
+                "n_results": 10
+            },
+            n_results=5,
+            include=["metadatas"]
         )
+        assert results_in and results_in.get("metadatas")
+        for metadata in results_in["metadatas"][0]:
+            if metadata:
+                assert metadata.get("tag") in ["ml", "python"]
+        print(f"   Found {len(results_in['ids'][0])} results with tag in ['ml', 'python']")
         
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result is not None
-        except Exception as e:
-            pytest.fail(f"OceanBase connection failed ({OB_HOST}:{OB_PORT}): {e}")
-        
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            inserted_ids = self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            time.sleep(1)
-            
-            results_in = collection.hybrid_search(
-                query={
-                    "where": {
-                        "tag": {"$in": ["ml", "python"]}
-                    },
-                    "n_results": 10
+        # Test $nin operator
+        print(f"   Testing hybrid_search with $nin operator")
+        results_nin = collection.hybrid_search(
+            query={
+                "where": {
+                    "tag": {"$nin": ["ml", "python"]}
                 },
-                n_results=5,
-                include=["metadatas"]
-            )
-            assert results_in and results_in.get("metadatas")
-            for metadata in results_in["metadatas"][0]:
-                if metadata:
-                    assert metadata.get("tag") in ["ml", "python"]
-            
-            results_nin = collection.hybrid_search(
-                query={
-                    "where": {
-                        "tag": {"$nin": ["ml", "python"]}
-                    },
-                    "n_results": 10
-                },
-                n_results=5,
-                include=["metadatas"]
-            )
-            assert results_nin and results_nin.get("metadatas")
-            for metadata in results_nin["metadatas"][0]:
-                if metadata:
-                    assert metadata.get("tag") not in ["ml", "python"]
-            
-            target_id = inserted_ids[0]
-            results_id = collection.hybrid_search(
-                query={
-                    "where": {
-                        "#id": {"$in": [target_id]}
-                    },
-                    "n_results": 5
-                },
-                n_results=5,
-                include=["metadatas"]
-            )
-            assert results_id and results_id.get("ids") and len(results_id["ids"][0]) > 0
-            assert target_id in results_id["ids"][0]
-        
-        finally:
-            self._cleanup_collection(client, collection_name)
-    
-    def test_server_hybrid_search_full_text_only(self):
-        """Test hybrid_search with only full-text search (query) using SeekdbServer"""
-        # Create SeekdbServer client
-        client = pyseekdb.Client(
-            host=SERVER_HOST,
-            port=SERVER_PORT,
-            tenant="sys",  # Default tenant for seekdb Server
-            database=SERVER_DATABASE,
-            user=SERVER_USER,
-            password=SERVER_PASSWORD
+                "n_results": 10
+            },
+            n_results=5,
+            include=["metadatas"]
         )
+        assert results_nin and results_nin.get("metadatas")
+        for metadata in results_nin["metadatas"][0]:
+            if metadata:
+                assert metadata.get("tag") not in ["ml", "python"]
+        print(f"   Found {len(results_nin['ids'][0])} results with tag not in ['ml', 'python']")
         
-        assert client is not None
-        assert hasattr(client, '_server')
-        assert isinstance(client._server, pyseekdb.RemoteServerClient)
-        
-        # Test connection
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result is not None
-        except Exception as e:
-            pytest.fail(f"SeekdbServer connection failed ({SERVER_HOST}:{SERVER_PORT}): {e}")
-        
-        # Create test collection
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            # Insert test data
-            self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            
-            # Wait a bit for indexes to be ready
-            time.sleep(1)
-            
-            # Test 1: Full-text search only
-            print(f"\n✅ Testing hybrid_search with full-text search only (SeekdbServer)")
-            results = collection.hybrid_search(
-                query={
-                    "where_document": {
-                        "$contains": "machine learning"
-                    }
+        # Test #id filter
+        print(f"   Testing hybrid_search with #id filter")
+        target_id = inserted_ids[0]
+        results_id = collection.hybrid_search(
+            query={
+                "where": {
+                    "#id": {"$in": [target_id]}
                 },
-                n_results=5,
-                include=["documents", "metadatas"]
-            )
-            
-            assert results is not None
-            assert "ids" in results
-            assert "documents" in results
-            assert "metadatas" in results
-            assert len(results["ids"]) > 0
-            assert len(results["ids"][0]) > 0
-            print(f"   Found {len(results['ids'][0])} results")
-            
-            # Verify results contain "machine learning"
-            for doc in results["documents"][0]:
-                if doc:
-                    assert "machine" in doc.lower() or "learning" in doc.lower()
-
-            # Test 1b: Full-text search with $not_contains
-            print(f"   Testing hybrid_search with $not_contains filter (SeekdbServer)")
-            forbidden_phrase = "machine learning"
-            results_not = collection.hybrid_search(
-                query={
-                    "where_document": {
-                        "$not_contains": forbidden_phrase
-                    }
-                },
-                n_results=5,
-                include=["documents", "metadatas"]
-            )
-
-            assert results_not is not None
-            assert "documents" in results_not
-            docs_not = results_not["documents"][0] if results_not.get("documents") else []
-            for doc in docs_not:
-                if doc:
-                    assert forbidden_phrase not in doc.lower()
-            
-        finally:
-            # Cleanup
-            self._cleanup_collection(client, collection_name)
-    
-    def test_server_hybrid_search_combined(self):
-        """Test hybrid_search with both full-text and vector search using SeekdbServer"""
-        # Create SeekdbServer client
-        client = pyseekdb.Client(
-            host=SERVER_HOST,
-            port=SERVER_PORT,
-            tenant="sys",  # Default tenant for seekdb Server
-            database=SERVER_DATABASE,
-            user=SERVER_USER,
-            password=SERVER_PASSWORD
+                "n_results": 5
+            },
+            n_results=5,
+            include=["metadatas"]
         )
-        
-        # Test connection
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result is not None
-        except Exception as e:
-            pytest.fail(f"SeekdbServer connection failed ({SERVER_HOST}:{SERVER_PORT}): {e}")
-        
-        # Create test collection
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            # Insert test data
-            self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            
-            # Wait a bit for indexes to be ready
-            time.sleep(1)
-            
-            # Test: Combined full-text and vector search
-            print(f"\n✅ Testing hybrid_search with both full-text and vector search (SeekdbServer)")
-            results = collection.hybrid_search(
-                query={
-                    "where_document": {
-                        "$contains": "machine learning"
-                    },
-                    "n_results": 10,
-                    "boost": 0.4
-                },
-                knn={
-                    "query_embeddings": self._generate_query_vector(actual_dimension),
-                    "n_results": 10,
-                    "boost": 1.6
-                },
-                rank={
-                    "rrf": {
-                        "rank_window_size": 60,
-                        "rank_constant": 60
-                    }
-                },
-                n_results=5,
-                include=["documents", "metadatas", "embeddings"]
-            )
-            
-            assert results is not None
-            assert "ids" in results
-            assert len(results["ids"]) > 0
-            assert len(results["ids"][0]) > 0
-            print(f"   Found {len(results['ids'][0])} results after RRF ranking")
-            
-        finally:
-            # Cleanup
-            self._cleanup_collection(client, collection_name)
-    
-    def test_server_hybrid_search_vector_only(self):
-        """Test hybrid_search with only vector search (knn) using SeekdbServer"""
-        # Create SeekdbServer client
-        client = pyseekdb.Client(
-            host=SERVER_HOST,
-            port=SERVER_PORT,
-            database=SERVER_DATABASE,
-            user=SERVER_USER,
-            password=SERVER_PASSWORD
-        )
-        
-        # Test connection
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result is not None
-        except Exception as e:
-            pytest.fail(f"SeekdbServer connection failed ({SERVER_HOST}:{SERVER_PORT}): {e}")
-        
-        # Create test collection
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            # Insert test data
-            self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            
-            # Wait a bit for indexes to be ready
-            time.sleep(1)
-            
-            # Test: Vector search only
-            print(f"\n✅ Testing hybrid_search with vector search only (SeekdbServer)")
-            results = collection.hybrid_search(
-                knn={
-                    "query_embeddings": self._generate_query_vector(actual_dimension),
-                    "n_results": 5
-                },
-                n_results=5,
-                include=["documents", "metadatas", "embeddings"]
-            )
-            
-            assert results is not None
-            assert "ids" in results
-            assert "distances" in results
-            assert len(results["ids"]) > 0
-            print(f"   Found {len(results['ids'])} results")
-            
-            # Verify distances are reasonable
-            distances = results["distances"][0]
-            assert len(distances) > 0
-            for dist in distances:
-                assert dist >= 0, f"Distance should be non-negative, got {dist}"
-            min_distance = min(distances)
-            assert min_distance < 10.0, f"At least one distance should be reasonable, got min={min_distance}"
-            
-        finally:
-            # Cleanup
-            self._cleanup_collection(client, collection_name)
-    
-    def test_server_hybrid_search_with_metadata_filter(self):
-        """Test hybrid_search with metadata filters using SeekdbServer"""
-        # Create SeekdbServer client
-        client = pyseekdb.Client(
-            host=SERVER_HOST,
-            port=SERVER_PORT,
-            database=SERVER_DATABASE,
-            user=SERVER_USER,
-            password=SERVER_PASSWORD
-        )
-        
-        # Test connection
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result is not None
-        except Exception as e:
-            pytest.fail(f"SeekdbServer connection failed ({SERVER_HOST}:{SERVER_PORT}): {e}")
-        
-        # Create test collection
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            # Insert test data
-            self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            
-            # Wait a bit for indexes to be ready
-            time.sleep(1)
-            
-            # Test: Hybrid search with metadata filter (simplified equality)
-            print(f"\n✅ Testing hybrid_search with metadata filter (SeekdbServer)")
-            results = collection.hybrid_search(
-                query={
-                    "where_document": {
-                        "$contains": "machine"
-                    },
-                    "where": {
-                        "$and": [
-                            {"category": "AI"},
-                            {"page": {"$gte": 1}},
-                            {"page": {"$lte": 5}}
-                        ]
-                    },
-                    "n_results": 10
-                },
-                knn={
-                    "query_embeddings": self._generate_query_vector(actual_dimension),
-                    "where": {
-                        "$and": [
-                            {"category": "AI"},
-                            {"score": {"$gte": 90}}
-                        ]
-                    },
-                    "n_results": 10
-                },
-                n_results=5,
-                include=["documents", "metadatas"]
-            )
-            
-            assert results is not None
-            assert len(results["ids"]) > 0
-            assert len(results["ids"][0]) > 0
-            print(f"   Found {len(results['ids'][0])} results with metadata filters")
-            
-            # Verify metadata filters are applied
-            for metadata in results["metadatas"][0]:
-                if metadata:
-                    assert metadata.get("category") == "AI"
-            
-        finally:
-            # Cleanup
-            self._cleanup_collection(client, collection_name)
-    
-    def test_server_hybrid_search_with_logical_operators(self):
-        """Test hybrid_search with logical operators in metadata filters using SeekdbServer"""
-        # Create SeekdbServer client
-        client = pyseekdb.Client(
-            host=SERVER_HOST,
-            port=SERVER_PORT,
-            database=SERVER_DATABASE,
-            user=SERVER_USER,
-            password=SERVER_PASSWORD
-        )
-        
-        # Test connection
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result is not None
-        except Exception as e:
-            pytest.fail(f"SeekdbServer connection failed ({SERVER_HOST}:{SERVER_PORT}): {e}")
-        
-        # Create test collection
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            # Insert test data
-            self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            
-            # Wait a bit for indexes to be ready
-            time.sleep(1)
-            
-            # Test: Hybrid search with logical operators
-            print(f"\n✅ Testing hybrid_search with logical operators (SeekdbServer)")
-            results = collection.hybrid_search(
-                query={
-                    "where_document": {
-                        "$and": [
-                            {"$contains": "machine"},
-                            {"$contains": "learning"}
-                        ]
-                    },
-                    "where": {
-                        "$or": [
-                            {"tag": {"$eq": "ml"}},
-                            {"tag": {"$eq": "python"}}
-                        ]
-                    },
-                    "n_results": 10
-                },
-                knn={
-                    "query_embeddings": self._generate_query_vector(actual_dimension),
-                    "where": {
-                        "tag": {"$in": ["ml", "python"]}
-                    },
-                    "n_results": 10
-                },
-                rank={"rrf": {}},
-                n_results=5,
-                include=["documents", "metadatas"]
-            )
-            
-            assert results is not None
-            assert len(results["ids"]) > 0
-            assert len(results["ids"][0]) > 0
-            print(f"   Found {len(results['ids'][0])} results with logical operators")
-            
-            # Verify logical operators are applied
-            for metadata in results["metadatas"][0]:
-                if metadata and "tag" in metadata:
-                    assert metadata["tag"] in ["ml", "python"]
-            
-        finally:
-            # Cleanup
-            self._cleanup_collection(client, collection_name)
-
-    def test_embedded_hybrid_search_scalar_in_nin_and_id(self):
-        """Test hybrid_search scalar $in/$nin and #id support using SeekdbEmbedded"""
-        try:
-            import pylibseekdb  # noqa: F401
-        except ImportError:
-            pytest.fail("seekdb embedded package is not installed")
-        
-        client = pyseekdb.Client(
-            path=SEEKDB_PATH,
-            database=SEEKDB_DATABASE
-        )
-        
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            inserted_ids = self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            time.sleep(1)
-            
-            results_in = collection.hybrid_search(
-                query={
-                    "where": {
-                        "tag": {"$in": ["ml", "python"]}
-                    },
-                    "n_results": 10
-                },
-                n_results=5,
-                include=["metadatas"]
-            )
-            assert results_in and results_in.get("metadatas")
-            for metadata in results_in["metadatas"][0]:
-                if metadata:
-                    assert metadata.get("tag") in ["ml", "python"]
-            
-            results_nin = collection.hybrid_search(
-                query={
-                    "where": {
-                        "tag": {"$nin": ["ml", "python"]}
-                    },
-                    "n_results": 10
-                },
-                n_results=5,
-                include=["metadatas"]
-            )
-            assert results_nin and results_nin.get("metadatas")
-            for metadata in results_nin["metadatas"][0]:
-                if metadata:
-                    assert metadata.get("tag") not in ["ml", "python"]
-            
-            target_id = inserted_ids[0]
-            results_id = collection.hybrid_search(
-                query={
-                    "where": {
-                        "#id": {"$in": [target_id]}
-                    },
-                    "n_results": 5
-                },
-                n_results=5,
-                include=["metadatas"]
-            )
-            assert results_id and results_id.get("ids") and len(results_id["ids"][0]) > 0
-            assert target_id in results_id["ids"][0]
-        
-        finally:
-            self._cleanup_collection(client, collection_name)
-
-    def test_server_hybrid_search_scalar_in_nin_and_id(self):
-        """Test hybrid_search scalar $in/$nin and #id support using SeekdbServer"""
-        client = pyseekdb.Client(
-            host=SERVER_HOST,
-            port=SERVER_PORT,
-            database=SERVER_DATABASE,
-            user=SERVER_USER,
-            password=SERVER_PASSWORD
-        )
-        
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result is not None
-        except Exception as e:
-            pytest.fail(f"SeekdbServer connection failed ({SERVER_HOST}:{SERVER_PORT}): {e}")
-        
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            inserted_ids = self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            time.sleep(1)
-            
-            results_in = collection.hybrid_search(
-                query={
-                    "where": {
-                        "tag": {"$in": ["ml", "python"]}
-                    },
-                    "n_results": 10
-                },
-                n_results=5,
-                include=["metadatas"]
-            )
-            assert results_in and results_in.get("metadatas")
-            for metadata in results_in["metadatas"][0]:
-                if metadata:
-                    assert metadata.get("tag") in ["ml", "python"]
-            
-            results_nin = collection.hybrid_search(
-                query={
-                    "where": {
-                        "tag": {"$nin": ["ml", "python"]}
-                    },
-                    "n_results": 10
-                },
-                n_results=5,
-                include=["metadatas"]
-            )
-            assert results_nin and results_nin.get("metadatas")
-            for metadata in results_nin["metadatas"][0]:
-                if metadata:
-                    assert metadata.get("tag") not in ["ml", "python"]
-            
-            target_id = inserted_ids[0]
-            results_id = collection.hybrid_search(
-                query={
-                    "where": {
-                        "#id": {"$in": [target_id]}
-                    },
-                    "n_results": 5
-                },
-                n_results=5,
-                include=["metadatas"]
-            )
-            assert results_id and results_id.get("ids") and len(results_id["ids"][0]) > 0
-            assert target_id in results_id["ids"][0]
-        
-        finally:
-            self._cleanup_collection(client, collection_name)
+        assert results_id and results_id.get("ids") and len(results_id["ids"][0]) > 0
+        assert target_id in results_id["ids"][0]
+        print(f"   Found target ID: {target_id}")
 
 
-    def test_embedded_hybrid_search_full_text_only(self):
-        """Test hybrid_search with only full-text search (query) using SeekdbEmbedded"""
-        # Check if seekdb package is available
-        try:
-            import pylibseekdb
-        except ImportError:
-            pytest.fail("seekdb embedded package is not installed")
-        
-        # Create embedded client
-        client = pyseekdb.Client(
-            path=SEEKDB_PATH,
-            database=SEEKDB_DATABASE
-        )
-        
-        assert client is not None
-        assert hasattr(client, '_server')
-        assert isinstance(client._server, pyseekdb.SeekdbEmbeddedClient)
-        
-        # Create test collection
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            # Insert test data
-            self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            
-            # Wait a bit for indexes to be ready
-            time.sleep(1)
-            
-            # Test 1: Full-text search only
-            print(f"\n✅ Testing hybrid_search with full-text search only (SeekdbEmbedded)")
-            results = collection.hybrid_search(
-                query={
-                    "where_document": {
-                        "$contains": "machine learning"
-                    }
-                },
-                n_results=5,
-                include=["documents", "metadatas"]
-            )
-            
-            assert results is not None
-            assert "ids" in results
-            assert "documents" in results
-            assert "metadatas" in results
-            assert len(results["ids"]) > 0
-            assert len(results["ids"][0]) > 0
-            print(f"   Found {len(results['ids'][0])} results")
-            
-            # Verify results contain "machine learning"
-            for doc in results["documents"][0]:
-                if doc:
-                    assert "machine" in doc.lower() or "learning" in doc.lower()
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "-s"])
 
-            # Test 1b: Full-text search with $not_contains
-            print(f"   Testing hybrid_search with $not_contains filter (SeekdbEmbedded)")
-            forbidden_phrase = "machine learning"
-            results_not = collection.hybrid_search(
-                query={
-                    "where_document": {
-                        "$not_contains": forbidden_phrase
-                    }
-                },
-                n_results=5,
-                include=["documents", "metadatas"]
-            )
-
-            assert results_not is not None
-            assert "documents" in results_not
-            docs_not = results_not["documents"][0] if results_not.get("documents") else []
-            for doc in docs_not:
-                if doc:
-                    assert forbidden_phrase not in doc.lower()
-            
-        finally:
-            # Cleanup
-            self._cleanup_collection(client, collection_name)
-    
-    def test_embedded_hybrid_search_vector_only(self):
-        """Test hybrid_search with only vector search (knn) using SeekdbEmbedded"""
-        # Check if seekdb package is available
-        try:
-            import pylibseekdb
-        except ImportError:
-            pytest.fail("seekdb embedded package is not installed")
-        
-        # Create embedded client
-        client = pyseekdb.Client(
-            path=SEEKDB_PATH,
-            database=SEEKDB_DATABASE
-        )
-        
-        # Create test collection
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            # Insert test data
-            self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            
-            # Wait a bit for indexes to be ready
-            time.sleep(1)
-            
-            # Test: Vector search only
-            print(f"\n✅ Testing hybrid_search with vector search only (SeekdbEmbedded)")
-            results = collection.hybrid_search(
-                knn={
-                    "query_embeddings": self._generate_query_vector(actual_dimension),
-                    "n_results": 5
-                },
-                n_results=5,
-                include=["documents", "metadatas", "embeddings"]
-            )
-            
-            assert results is not None
-            assert "ids" in results
-            assert "distances" in results
-            assert len(results["ids"]) > 0
-            print(f"   Found {len(results['ids'])} results")
-            
-            # Verify distances are reasonable
-            distances = results["distances"][0]
-            assert len(distances) > 0
-            for dist in distances:
-                assert dist >= 0, f"Distance should be non-negative, got {dist}"
-            min_distance = min(distances)
-            assert min_distance < 10.0, f"At least one distance should be reasonable, got min={min_distance}"
-            
-        finally:
-            # Cleanup
-            self._cleanup_collection(client, collection_name)
-    
-    def test_embedded_hybrid_search_combined(self):
-        """Test hybrid_search with both full-text and vector search using SeekdbEmbedded"""
-        # Check if seekdb package is available
-        try:
-            import pylibseekdb
-        except ImportError:
-            pytest.fail("seekdb embedded package is not installed")
-        
-        # Create embedded client
-        client = pyseekdb.Client(
-            path=SEEKDB_PATH,
-            database=SEEKDB_DATABASE
-        )
-        
-        # Create test collection
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            # Insert test data
-            self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            
-            # Wait a bit for indexes to be ready
-            time.sleep(1)
-            
-            # Test: Combined full-text and vector search
-            print(f"\n✅ Testing hybrid_search with both full-text and vector search (SeekdbEmbedded)")
-            results = collection.hybrid_search(
-                query={
-                    "where_document": {
-                        "$contains": "machine learning"
-                    },
-                    "n_results": 10,
-                    "boost": 0.4
-                },
-                knn={
-                    "query_embeddings": self._generate_query_vector(actual_dimension),
-                    "n_results": 10,
-                    "boost": 1.6
-                },
-                rank={
-                    "rrf": {
-                        "rank_window_size": 60,
-                        "rank_constant": 60
-                    }
-                },
-                n_results=5,
-                include=["documents", "metadatas", "embeddings"]
-            )
-            
-            assert results is not None
-            assert "ids" in results
-            assert len(results["ids"]) > 0
-            assert len(results["ids"][0]) > 0
-            print(f"   Found {len(results['ids'][0])} results after RRF ranking")
-            
-        finally:
-            # Cleanup
-            self._cleanup_collection(client, collection_name)
-    
-    def test_embedded_hybrid_search_with_metadata_filter(self):
-        """Test hybrid_search with metadata filters using SeekdbEmbedded"""
-        # Check if seekdb package is available
-        try:
-            import pylibseekdb
-        except ImportError:
-            pytest.fail("seekdb embedded package is not installed")
-        
-        # Create embedded client
-        client = pyseekdb.Client(
-            path=SEEKDB_PATH,
-            database=SEEKDB_DATABASE
-        )
-        
-        # Create test collection
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            # Insert test data
-            self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            
-            # Wait a bit for indexes to be ready
-            time.sleep(1)
-            
-            # Test: Hybrid search with metadata filter
-            print(f"\n✅ Testing hybrid_search with metadata filter (SeekdbEmbedded)")
-            results = collection.hybrid_search(
-                query={
-                    "where_document": {
-                        "$contains": "machine"
-                    },
-                    "where": {
-                        "$and": [
-                            {"category": {"$eq": "AI"}},
-                            {"page": {"$gte": 1}},
-                            {"page": {"$lte": 5}}
-                        ]
-                    },
-                    "n_results": 10
-                },
-                knn={
-                    "query_embeddings": self._generate_query_vector(actual_dimension),
-                    "where": {
-                        "$and": [
-                            {"category": {"$eq": "AI"}},
-                            {"score": {"$gte": 90}}
-                        ]
-                    },
-                    "n_results": 10
-                },
-                n_results=5,
-                include=["documents", "metadatas"]
-            )
-            
-            assert results is not None
-            assert len(results["ids"]) > 0
-            assert len(results["ids"][0]) > 0
-            print(f"   Found {len(results['ids'][0])} results with metadata filters")
-            
-            # Verify metadata filters are applied
-            for metadata in results["metadatas"][0]:
-                if metadata:
-                    assert metadata.get("category") == "AI"
-            
-        finally:
-            # Cleanup
-            self._cleanup_collection(client, collection_name)
-    
-    def test_embedded_hybrid_search_with_logical_operators(self):
-        """Test hybrid_search with logical operators in metadata filters using SeekdbEmbedded"""
-        # Check if seekdb package is available
-        try:
-            import pylibseekdb
-        except ImportError:
-            pytest.fail("seekdb embedded package is not installed")
-        
-        # Create embedded client
-        client = pyseekdb.Client(
-            path=SEEKDB_PATH,
-            database=SEEKDB_DATABASE
-        )
-        
-        # Create test collection
-        collection_name = f"test_hybrid_search_{int(time.time())}"
-        collection, actual_dimension = self._create_test_collection(client, collection_name)
-        
-        try:
-            # Insert test data
-            self._insert_test_data(client, collection_name, dimension=actual_dimension)
-            
-            # Wait a bit for indexes to be ready
-            time.sleep(1)
-            
-            # Test: Hybrid search with logical operators
-            print(f"\n✅ Testing hybrid_search with logical operators (SeekdbEmbedded)")
-            results = collection.hybrid_search(
-                query={
-                    "where_document": {
-                        "$and": [
-                            {"$contains": "machine"},
-                            {"$contains": "learning"}
-                        ]
-                    },
-                    "where": {
-                        "$or": [
-                            {"tag": {"$eq": "ml"}},
-                            {"tag": {"$eq": "python"}}
-                        ]
-                    },
-                    "n_results": 10
-                },
-                knn={
-                    "query_embeddings": self._generate_query_vector(actual_dimension),
-                    "where": {
-                        "tag": {"$in": ["ml", "python"]}
-                    },
-                    "n_results": 10
-                },
-                rank={"rrf": {}},
-                n_results=5,
-                include=["documents", "metadatas"]
-            )
-            
-            assert results is not None
-            assert len(results["ids"]) > 0
-            assert len(results["ids"][0]) > 0
-            print(f"   Found {len(results['ids'][0])} results with logical operators")
-            
-            # Verify logical operators are applied
-            for metadata in results["metadatas"][0]:
-                if metadata and "tag" in metadata:
-                    assert metadata["tag"] in ["ml", "python"]
-            
-        finally:
-            # Cleanup
-            self._cleanup_collection(client, collection_name)

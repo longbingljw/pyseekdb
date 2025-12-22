@@ -1,5 +1,6 @@
 """
-Official example test case - verifies the documented quick-start workflow.
+Official example test case - REFACTORED using db_client fixture
+Verifies the documented quick-start workflow.
 
 The scenario mirrors `pyseekdb/examples/official_example.py` and covers:
 1. Creating a default client (embedded/server/OceanBase, configurable by env vars)
@@ -7,39 +8,10 @@ The scenario mirrors `pyseekdb/examples/official_example.py` and covers:
 3. Upserting only documents/metadatas/ids (relying on default embedding function)
 4. Querying with query_texts + metadata filter + document filter
 """
-import os
-import sys
 import time
-from pathlib import Path
-
 import pytest
 
-# Ensure the project root is importable when tests run in isolation
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root))
-
-import pyseekdb  # noqa: E402
-
-
-# ==================== Environment Variable Configuration ====================
-# Embedded mode
-SEEKDB_PATH = os.environ.get("SEEKDB_PATH", os.path.join(project_root, "seekdb.db"))
-SEEKDB_DATABASE = os.environ.get("SEEKDB_DATABASE", "test")
-
-# Server mode
-SERVER_HOST = os.environ.get("SERVER_HOST", "127.0.0.1")
-SERVER_PORT = int(os.environ.get("SERVER_PORT", "2881"))
-SERVER_DATABASE = os.environ.get("SERVER_DATABASE", "test")
-SERVER_USER = os.environ.get("SERVER_USER", "root")
-SERVER_PASSWORD = os.environ.get("SERVER_PASSWORD", "")
-
-# OceanBase mode
-OB_HOST = os.environ.get("OB_HOST", "localhost")
-OB_PORT = int(os.environ.get("OB_PORT", "11202"))
-OB_TENANT = os.environ.get("OB_TENANT", "mysql")
-OB_DATABASE = os.environ.get("OB_DATABASE", "test")
-OB_USER = os.environ.get("OB_USER", "root")
-OB_PASSWORD = os.environ.get("OB_PASSWORD", "")
+import pyseekdb
 
 
 PRODUCT_DOCUMENTS = [
@@ -97,82 +69,22 @@ def _run_official_example(collection):
     return results
 
 
-class TestOfficialExample:
-    """Test suite that mirrors the official example across deployment modes."""
+class TestOfficialExampleRefactored:
+    """Test suite that mirrors the official example using parameterized db_client fixture."""
 
-    def _cleanup_collection(self, client, name: str):
-        try:
-            client.delete_collection(name=name)
-        except Exception as cleanup_error:  # pragma: no cover - best effort cleanup
-            print(f"Warning: failed to cleanup collection '{name}': {cleanup_error}")
-
-    def _create_collection(self, client):
-        collection_name = f"official_example_{int(time.time())}"
-        collection = client.get_or_create_collection(name=collection_name)
-        return collection_name, collection
-
-    def test_embedded_official_example(self):
-        """Official example using embedded client (SeekdbEmbedded)."""
-        try:
-            import pylibseekdb  # noqa: F401
-        except ImportError:
-            pytest.fail("seekdb embedded package is not installed")
-
-        client = pyseekdb.Client(path=SEEKDB_PATH, database=SEEKDB_DATABASE)
-        collection_name, collection = self._create_collection(client)
-
-        try:
-            _run_official_example(collection)
-        finally:
-            self._cleanup_collection(client, collection_name)
-
-    def test_server_official_example(self):
-        """Official example using seekdb server (RemoteServerClient default tenant)."""
-        client = pyseekdb.Client(
-            host=SERVER_HOST,
-            port=SERVER_PORT,
-            tenant="sys",
-            database=SERVER_DATABASE,
-            user=SERVER_USER,
-            password=SERVER_PASSWORD,
-        )
-
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result and result[0].get("test") == 1
-        except Exception as exc:
-            pytest.fail(f"seekdb server connection failed ({SERVER_HOST}:{SERVER_PORT}): {exc}")
-
-        collection_name, collection = self._create_collection(client)
-
-        try:
-            _run_official_example(collection)
-        finally:
-            self._cleanup_collection(client, collection_name)
-
-    def test_oceanbase_official_example(self):
-        """Official example using OceanBase deployment."""
-        client = pyseekdb.Client(
-            host=OB_HOST,
-            port=OB_PORT,
-            tenant=OB_TENANT,
-            database=OB_DATABASE,
-            user=OB_USER,
-            password=OB_PASSWORD,
-        )
-
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result and result[0].get("test") == 1
-        except Exception as exc:
-            pytest.fail(f"OceanBase connection failed ({OB_HOST}:{OB_PORT}): {exc}")
-
-        collection_name, collection = self._create_collection(client)
-
-        try:
-            _run_official_example(collection)
-        finally:
-            self._cleanup_collection(client, collection_name)
+    def test_official_example(self, db_client):
+        """
+        Official example using client (automatic mode selection).
+        
+        Automatically runs for: embedded, server, oceanbase
+        """
+        collection_name = f"official_example_{int(time.time() * 1000)}"
+        collection = db_client.get_or_create_collection(name=collection_name)
+        
+        # Run the official example workflow
+        _run_official_example(collection)
+        
+        # Note: cleanup is handled automatically by the db_client fixture
 
 
 if __name__ == "__main__":

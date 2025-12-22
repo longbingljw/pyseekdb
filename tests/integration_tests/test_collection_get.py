@@ -1,21 +1,14 @@
 """
 Collection get tests - testing collection.get() interface for all three modes
-Supports configuring connection parameters via environment variables
+Refactored to use db_client fixture for parameterized testing
 """
 import pytest
-import sys
-import os
 import time
 import json
 import uuid
-from pathlib import Path
-
-# Add project path
-project_root = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(project_root))
+from typing import List, Union
 
 import pyseekdb
-from typing import List, Union
 
 
 # ==================== Simple 3D Embedding Function for Testing ====================
@@ -42,27 +35,6 @@ class Simple3DEmbeddingFunction:
             embeddings.append(embedding)
         
         return embeddings
-
-
-# ==================== Environment Variable Configuration ====================
-# Embedded mode
-SEEKDB_PATH = os.environ.get('SEEKDB_PATH', os.path.join(project_root, "seekdb.db"))
-SEEKDB_DATABASE = os.environ.get('SEEKDB_DATABASE', 'test')
-
-# Server mode
-SERVER_HOST = os.environ.get('SERVER_HOST', '127.0.0.1')
-SERVER_PORT = int(os.environ.get('SERVER_PORT', '2881'))
-SERVER_DATABASE = os.environ.get('SERVER_DATABASE', 'test')
-SERVER_USER = os.environ.get('SERVER_USER', 'root')
-SERVER_PASSWORD = os.environ.get('SERVER_PASSWORD', '')
-
-# OceanBase mode
-OB_HOST = os.environ.get('OB_HOST', 'localhost')
-OB_PORT = int(os.environ.get('OB_PORT', '11202'))
-OB_TENANT = os.environ.get('OB_TENANT', 'mysql')
-OB_DATABASE = os.environ.get('OB_DATABASE', 'test')
-OB_USER = os.environ.get('OB_USER', 'root')
-OB_PASSWORD = os.environ.get('OB_PASSWORD', '')
 
 
 class TestCollectionGet:
@@ -132,10 +104,19 @@ class TestCollectionGet:
         
         return inserted_ids
 
-    def _test_metadata_array_in_overlap(self, client):
-        """Shared test flow for metadata array $in/$nin using JSON_OVERLAPS."""
+    def test_metadata_array_in_nin_overlap(self, db_client):
+        """
+        Regression test for JSON array $in/$nin operators.
+        
+        Tests:
+        - $in with overlap, disjoint, empty list
+        - $nin with complementary expectations
+        - Handles missing fields, null values, empty arrays
+        
+        Automatically runs for: embedded, server, oceanbase
+        """
         collection_name = f"test_tags_in_{int(time.time() * 1000)}"
-        collection = client.get_or_create_collection(
+        collection = db_client.get_or_create_collection(
             name=collection_name,
             embedding_function=pyseekdb.DefaultEmbeddingFunction(),
         )
@@ -154,7 +135,7 @@ class TestCollectionGet:
                 ],
             )
 
-            # $in with overlap
+            # Test $in with overlap
             result = collection.get(
                 where={"tags": {"$in": ["ml", "python"]}},
                 include=["metadatas", "ids"],
@@ -162,7 +143,7 @@ class TestCollectionGet:
             assert result and "ids" in result
             assert set(result["ids"]) == {"id_overlap"}
 
-            # $in with disjoint values -> no hits
+            # Test $in with disjoint values -> no hits
             result = collection.get(
                 where={"tags": {"$in": ["ruby"]}},
                 include=["ids"],
@@ -170,7 +151,7 @@ class TestCollectionGet:
             assert result and "ids" in result
             assert len(result["ids"]) == 0
 
-            # $in with empty list -> should return 0 rows
+            # Test $in with empty list -> should return 0 rows
             result = collection.get(
                 where={"tags": {"$in": []}},
                 include=["ids"],
@@ -178,529 +159,221 @@ class TestCollectionGet:
             assert result and "ids" in result
             assert len(result["ids"]) == 0
 
-            # $nin should keep disjoint/null/empty, exclude overlap; missing is excluded by JSON behavior
+            # Test $nin should keep disjoint/null/empty, exclude overlap
             result = collection.get(
                 where={"tags": {"$nin": ["ml", "python"]}},
                 include=["ids"],
             )
             assert result and "ids" in result
             assert set(result["ids"]) == {"id_disjoint", "id_null", "id_empty"}
+            
+            # Additional $nin test with two records
+            collection_name_2 = f"test_tags_nin_{int(time.time() * 1000)}"
+            collection_2 = db_client.get_or_create_collection(
+                name=collection_name_2,
+                embedding_function=pyseekdb.DefaultEmbeddingFunction(),
+            )
+            
+            try:
+                # Insert two records: one with overlap, one without
+                collection_2.add(
+                    ids=["id1", "id2"],
+                    documents=["", ""],
+                    metadatas=[
+                        {"category": "AI", "tags": ["ml", "ai"]},  # has overlap with ["ml", "python"]
+                        {"category": "Web", "tags": ["java", "cpp"]},  # no overlap with ["ml", "python"]
+                    ],
+                )
+
+                result = collection_2.get(
+                    where={"tags": {"$nin": ["ml", "python"]}},
+                    include=["metadatas", "ids"],
+                )
+
+                # Expect 1 row (id2) because its tags have no overlap with the exclusion list
+                assert result is not None
+                assert "ids" in result
+                assert len(result["ids"]) == 1
+                assert "id2" in result["ids"]
+                assert "id1" not in result["ids"]
+                assert result["metadatas"][0].get("tags") == ["java", "cpp"]
+            finally:
+                try:
+                    db_client.delete_collection(name=collection_name_2)
+                except Exception:
+                    pass
+                    
         finally:
             try:
-                client.delete_collection(name=collection_name)
-            except Exception as cleanup_error:  # pragma: no cover
+                db_client.delete_collection(name=collection_name)
+            except Exception as cleanup_error:
                 print(f"Warning: cleanup failed for {collection_name}: {cleanup_error}")
 
-    def _test_collection_get(self, collection, inserted_ids):
-        # Test 1: Get by single ID
-        print("\n✅ Testing get by single ID")
-        results = collection.get(ids=inserted_ids[0])
-        assert results is not None
-        assert "ids" in results
-        assert len(results["ids"]) == 1
-        print(f"   Found {len(results['ids'])} result for ID={inserted_ids[0]}")
+    def test_collection_get(self, db_client):
+        """
+        Test collection.get() interface with various query patterns.
+        
+        Tests:
+        - Get by single/multiple IDs
+        - Get with metadata/document filters
+        - Get with logical operators ($or)
+        - Get with limit/offset
+        - Get with include parameter
+        - Get with scalar $in/$nin operators
+        
+        Automatically runs for: embedded, server, oceanbase
+        """
+        # Create test collection
+        collection_name = f"test_get_{int(time.time() * 1000)}"
+        config = pyseekdb.HNSWConfiguration(dimension=3, distance='l2')
+        # Use a simple 3D embedding function to match the dimension
+        embedding_function = Simple3DEmbeddingFunction()
+        collection = db_client.create_collection(
+            name=collection_name,
+            configuration=config,
+            embedding_function=embedding_function
+        )
+        
+        try:
+            inserted_ids = self._insert_test_data(db_client, collection_name)
+            assert len(inserted_ids) > 0, f"Failed to get inserted IDs. Expected at least 1, got {len(inserted_ids)}"
+            if len(inserted_ids) < 5:
+                print(f"   Warning: Expected 5 inserted IDs, but got {len(inserted_ids)}")
 
-        # Test 2: Get by multiple IDs
-        print("✅ Testing get by multiple IDs")
-        if len(inserted_ids) >= 3:
-            results = collection.get(ids=inserted_ids[:3])
+            # Test 1: Get by single ID
+            print("\n✅ Testing get by single ID")
+            results = collection.get(ids=inserted_ids[0])
+            assert results is not None
+            assert "ids" in results
+            assert len(results["ids"]) == 1
+            print(f"   Found {len(results['ids'])} result for ID={inserted_ids[0]}")
+
+            # Test 2: Get by multiple IDs
+            print("✅ Testing get by multiple IDs")
+            if len(inserted_ids) >= 3:
+                results = collection.get(ids=inserted_ids[:3])
+                assert results is not None
+                assert "ids" in results
+                assert len(results["ids"]) <= 3
+                print(f"   Found {len(results['ids'])} results for IDs={inserted_ids[:3]}")
+
+            # Test 3: Get by metadata filter
+            print("✅ Testing get with metadata filter (category=AI)")
+            results = collection.get(where={"category": {"$eq": "AI"}}, limit=10)
+            assert results is not None
+            assert len(results["ids"]) > 0
+            print(f"   Found {len(results['ids'])} results with category='AI'")
+
+            # Test 4: Get with logical operators ($or)
+            print("✅ Testing get with logical operators ($or)")
+            results = collection.get(
+                where={
+                    "$or": [
+                        {"category": "AI"},
+                        {"tag": "python"},
+                    ]
+                },
+                limit=10,
+            )
+            assert results is not None
+            print(f"   Found {len(results['ids'])} results with $or condition")
+
+            # Test 5: Get by document filter
+            print("✅ Testing get with document filter")
+            results = collection.get(where_document={"$contains": "machine learning"}, limit=10)
+            assert results is not None
+            print(f"   Found {len(results['ids'])} results containing 'machine learning'")
+
+            # Test 6: Get with combined filters
+            print("✅ Testing get with combined filters")
+            results = collection.get(
+                where={"category": {"$eq": "AI"}},
+                where_document={"$contains": "machine"},
+                limit=10,
+            )
+            assert results is not None
+            print(f"   Found {len(results['ids'])} results matching all filters")
+
+            # Test 7: Get with limit and offset
+            print("✅ Testing get with limit and offset")
+            results = collection.get(limit=3, offset=0)
             assert results is not None
             assert "ids" in results
             assert len(results["ids"]) <= 3
-            print(f"   Found {len(results['ids'])} results for IDs={inserted_ids[:3]}")
+            print(f"   Found {len(results['ids'])} results (limit=3, offset=0)")
 
-        # Test 3: Get by metadata filter
-        print("✅ Testing get with metadata filter (category=AI)")
-        results = collection.get(where={"category": {"$eq": "AI"}}, limit=10)
-        assert results is not None
-        assert len(results["ids"]) > 0
-        print(f"   Found {len(results['ids'])} results with category='AI'")
+            # Test 8: Get all data without filters
+            print("✅ Testing get all data without filters")
+            results = collection.get(limit=100)
+            assert results is not None
+            assert len(results["ids"]) > 0
+            print(f"   Found {len(results['ids'])} total results")
 
-        # Test 4: Get with logical operators ($or)
-        print("✅ Testing get with logical operators ($or)")
-        results = collection.get(
-            where={
-                "$or": [
-                    {"category": "AI"},
-                    {"tag": "python"},
-                ]
-            },
-            limit=10,
-        )
-        assert results is not None
-        print(f"   Found {len(results['ids'])} results with $or condition")
-
-        # Test 5: Get by document filter
-        print("✅ Testing get with document filter")
-        results = collection.get(where_document={"$contains": "machine learning"}, limit=10)
-        assert results is not None
-        print(f"   Found {len(results['ids'])} results containing 'machine learning'")
-
-        # Test 6: Get with combined filters
-        print("✅ Testing get with combined filters")
-        results = collection.get(
-            where={"category": {"$eq": "AI"}},
-            where_document={"$contains": "machine"},
-            limit=10,
-        )
-        assert results is not None
-        print(f"   Found {len(results['ids'])} results matching all filters")
-
-        # Test 7: Get with limit and offset
-        print("✅ Testing get with limit and offset")
-        results = collection.get(limit=3, offset=0)
-        assert results is not None
-        assert "ids" in results
-        assert len(results["ids"]) <= 3
-        print(f"   Found {len(results['ids'])} results (limit=3, offset=0)")
-
-        # Test 8: Get all data without filters
-        print("✅ Testing get all data without filters")
-        results = collection.get(limit=100)
-        assert results is not None
-        assert len(results["ids"]) > 0
-        print(f"   Found {len(results['ids'])} total results")
-
-        # Test 9: Get with include parameter
-        print("✅ Testing get with include parameter")
-        results = collection.get(
-            ids=inserted_ids[:2],
-            include=["documents", "metadatas"],
-        )
-        assert results is not None
-        assert isinstance(results, dict), "Should return dict"
-        assert "ids" in results
-        assert "documents" in results
-        assert "metadatas" in results
-        assert len(results["ids"]) == 2
-        print(f"   Found {len(results['ids'])} results with documents and metadatas")
-
-        # Test 10: Get by multiple IDs (should return dict)
-        print("✅ Testing get by multiple IDs (returns dict)")
-        if len(inserted_ids) >= 3:
-            results = collection.get(ids=inserted_ids[:3])
+            # Test 9: Get with include parameter
+            print("✅ Testing get with include parameter")
+            results = collection.get(
+                ids=inserted_ids[:2],
+                include=["documents", "metadatas"],
+            )
             assert results is not None
             assert isinstance(results, dict), "Should return dict"
             assert "ids" in results
-            assert len(results["ids"]) <= 3
-            print(f"   Found {len(results['ids'])} results for {len(inserted_ids[:3])} IDs")
+            assert "documents" in results
+            assert "metadatas" in results
+            assert len(results["ids"]) == 2
+            print(f"   Found {len(results['ids'])} results with documents and metadatas")
 
-        # Test 11: Single ID returns dict format
-        print("✅ Testing single ID returns dict format")
-        results = collection.get(ids=inserted_ids[0])
-        assert results is not None
-        assert isinstance(results, dict), "Should return dict"
-        assert "ids" in results
-        assert len(results["ids"]) == 1
-        print(f"   Single result with {len(results['ids'])} item")
+            # Test 10: Get by multiple IDs (should return dict)
+            print("✅ Testing get by multiple IDs (returns dict)")
+            if len(inserted_ids) >= 3:
+                results = collection.get(ids=inserted_ids[:3])
+                assert results is not None
+                assert isinstance(results, dict), "Should return dict"
+                assert "ids" in results
+                assert len(results["ids"]) <= 3
+                print(f"   Found {len(results['ids'])} results for {len(inserted_ids[:3])} IDs")
 
-        # Test 12: Get with filters returns dict format
-        print("✅ Testing get with filters returns dict format")
-        results = collection.get(where={"category": {"$eq": "AI"}}, limit=10)
-        assert results is not None
-        assert isinstance(results, dict), "Should return dict"
-        assert "ids" in results
-        print(f"   Found {len(results['ids'])} items matching filter")
+            # Test 11: Single ID returns dict format
+            print("✅ Testing single ID returns dict format")
+            results = collection.get(ids=inserted_ids[0])
+            assert results is not None
+            assert isinstance(results, dict), "Should return dict"
+            assert "ids" in results
+            assert len(results["ids"]) == 1
+            print(f"   Single result with {len(results['ids'])} item")
 
-        # Test 13: Get with scalar $in operator
-        print("✅ Testing get with scalar $in operator")
-        results = collection.get(where={"tag": {"$in": ["ml", "python"]}}, limit=10)
-        assert results is not None
-        assert "ids" in results
-        assert len(results["ids"]) > 0
-        print(f"   Found {len(results['ids'])} results with tag in ['ml', 'python']")
+            # Test 12: Get with filters returns dict format
+            print("✅ Testing get with filters returns dict format")
+            results = collection.get(where={"category": {"$eq": "AI"}}, limit=10)
+            assert results is not None
+            assert isinstance(results, dict), "Should return dict"
+            assert "ids" in results
+            print(f"   Found {len(results['ids'])} items matching filter")
 
-        # Test 14: Get with scalar $nin operator
-        print("✅ Testing get with scalar $nin operator")
-        results = collection.get(where={"tag": {"$nin": ["ml", "python"]}}, limit=10)
-        assert results is not None
-        assert "ids" in results
-        # Should return rows with tag='neural' (excluded 'ml' and 'python')
-        print(f"   Found {len(results['ids'])} results with tag not in ['ml', 'python']")
+            # Test 13: Get with scalar $in operator
+            print("✅ Testing get with scalar $in operator")
+            results = collection.get(where={"tag": {"$in": ["ml", "python"]}}, limit=10)
+            assert results is not None
+            assert "ids" in results
+            assert len(results["ids"]) > 0
+            print(f"   Found {len(results['ids'])} results with tag in ['ml', 'python']")
 
-    def test_embedded_metadata_array_in_overlap(self):
-        """
-        Regression test for JSON array $in operator with embedded client.
-        Includes overlap, disjoint, empty list, and complementary $nin expectations.
-        """
-        try:
-            import pylibseekdb  # noqa: F401
-        except ImportError:
-            pytest.skip("seekdb embedded package is not installed")
-
-        client = pyseekdb.Client(
-            path=SEEKDB_PATH,
-            database=SEEKDB_DATABASE
-        )
-        self._test_metadata_array_in_overlap(client)
-    
-    def test_server_metadata_array_in_overlap(self):
-        """
-        Regression test for JSON array $in operator with server client.
-        Includes overlap, disjoint, empty list, and complementary $nin expectations.
-        """
-        client = pyseekdb.Client(
-            host=SERVER_HOST,
-            port=SERVER_PORT,
-            tenant="sys",
-            database=SERVER_DATABASE,
-            user=SERVER_USER,
-            password=SERVER_PASSWORD
-        )
-
-        # Test connection
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result and result[0].get("test") == 1
-        except Exception as exc:
-            pytest.fail(f"seekdb server connection failed ({SERVER_HOST}:{SERVER_PORT}): {exc}")
-        self._test_metadata_array_in_overlap(client)
-    
-    def test_oceanbase_metadata_array_in_overlap(self):
-        """
-        Regression test for JSON array $in operator with OceanBase client.
-        Includes overlap, disjoint, empty list, and complementary $nin expectations.
-        """
-        client = pyseekdb.Client(
-            host=OB_HOST,
-            port=OB_PORT,
-            tenant=OB_TENANT,
-            database=OB_DATABASE,
-            user=OB_USER,
-            password=OB_PASSWORD
-        )
-
-        # Test connection
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result and result[0].get("test") == 1
-        except Exception as exc:
-            pytest.fail(f"OceanBase connection failed ({OB_HOST}:{OB_PORT}): {exc}")
-        self._test_metadata_array_in_overlap(client)
-    
-    def test_embedded_metadata_array_nin_overlap(self):
-        """
-        Regression test for JSON array $nin operator with embedded client.
-        Tests that tags=["ml","ai"] is excluded by $nin ["ml","python"] via JSON_OVERLAPS.
-        """
-        try:
-            import pylibseekdb  # noqa: F401
-        except ImportError:
-            pytest.skip("seekdb embedded package is not installed")
-
-        client = pyseekdb.Client(
-            path=SEEKDB_PATH,
-            database=SEEKDB_DATABASE
-        )
-
-        collection_name = f"test_tags_nin_{int(time.time() * 1000)}"
-        collection = client.get_or_create_collection(
-            name=collection_name,
-            embedding_function=pyseekdb.DefaultEmbeddingFunction(),
-        )
-
-        try:
-            # Insert two records: one with overlap, one without
-            collection.add(
-                ids=["id1", "id2"],
-                documents=["", ""],
-                metadatas=[
-                    {"category": "AI", "tags": ["ml", "ai"]},  # has overlap with ["ml", "python"]
-                    {"category": "Web", "tags": ["java", "cpp"]},  # no overlap with ["ml", "python"]
-                ],
-            )
-
-            result = collection.get(
-                where={"tags": {"$nin": ["ml", "python"]}},
-                include=["metadatas", "ids"],
-            )
-
-            # Expect 1 row (id2) because its tags have no overlap with the exclusion list
-            assert result is not None
-            assert "ids" in result
-            assert len(result["ids"]) == 1
-            assert "id2" in result["ids"]
-            assert "id1" not in result["ids"]
-            assert result["metadatas"][0].get("tags") == ["java", "cpp"]
-        finally:
-            try:
-                client.delete_collection(name=collection_name)
-            except Exception as cleanup_error:  # pragma: no cover
-                print(f"Warning: cleanup failed for {collection_name}: {cleanup_error}")
-    
-    def test_server_metadata_array_nin_overlap(self):
-        """
-        Regression test for JSON array $nin operator with server client.
-        Tests that tags=["ml","ai"] is excluded by $nin ["ml","python"] via JSON_OVERLAPS.
-        """
-        client = pyseekdb.Client(
-            host=SERVER_HOST,
-            port=SERVER_PORT,
-            tenant="sys",
-            database=SERVER_DATABASE,
-            user=SERVER_USER,
-            password=SERVER_PASSWORD
-        )
-
-        # Test connection
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result and result[0].get("test") == 1
-        except Exception as exc:
-            pytest.fail(f"seekdb server connection failed ({SERVER_HOST}:{SERVER_PORT}): {exc}")
-
-        collection_name = f"test_tags_nin_{int(time.time() * 1000)}"
-        collection = client.get_or_create_collection(
-            name=collection_name,
-            embedding_function=pyseekdb.DefaultEmbeddingFunction(),
-        )
-
-        try:
-            # Insert two records: one with overlap, one without
-            collection.add(
-                ids=["id1", "id2"],
-                documents=["", ""],
-                metadatas=[
-                    {"category": "AI", "tags": ["ml", "ai"]},  # has overlap with ["ml", "python"]
-                    {"category": "Web", "tags": ["java", "cpp"]},  # no overlap with ["ml", "python"]
-                ],
-            )
-
-            result = collection.get(
-                where={"tags": {"$nin": ["ml", "python"]}},
-                include=["metadatas", "ids"],
-            )
-
-            # Expect 1 row (id2) because its tags have no overlap with the exclusion list
-            assert result is not None
-            assert "ids" in result
-            assert len(result["ids"]) == 1
-            assert "id2" in result["ids"]
-            assert "id1" not in result["ids"]
-            assert result["metadatas"][0].get("tags") == ["java", "cpp"]
-        finally:
-            try:
-                client.delete_collection(name=collection_name)
-            except Exception as cleanup_error:  # pragma: no cover
-                print(f"Warning: cleanup failed for {collection_name}: {cleanup_error}")
-    
-    def test_oceanbase_metadata_array_nin_overlap(self):
-        """
-        Regression test for JSON array $nin operator with OceanBase client.
-        Tests that tags=["ml","ai"] is excluded by $nin ["ml","python"] via JSON_OVERLAPS.
-        """
-        client = pyseekdb.Client(
-            host=OB_HOST,
-            port=OB_PORT,
-            tenant=OB_TENANT,
-            database=OB_DATABASE,
-            user=OB_USER,
-            password=OB_PASSWORD
-        )
-
-        # Test connection
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result and result[0].get("test") == 1
-        except Exception as exc:
-            pytest.fail(f"OceanBase connection failed ({OB_HOST}:{OB_PORT}): {exc}")
-
-        collection_name = f"test_tags_nin_{int(time.time() * 1000)}"
-        collection = client.get_or_create_collection(
-            name=collection_name,
-            embedding_function=pyseekdb.DefaultEmbeddingFunction(),
-        )
-
-        try:
-            # Insert two records: one with overlap, one without
-            collection.add(
-                ids=["id1", "id2"],
-                documents=["", ""],
-                metadatas=[
-                    {"category": "AI", "tags": ["ml", "ai"]},  # has overlap with ["ml", "python"]
-                    {"category": "Web", "tags": ["java", "cpp"]},  # no overlap with ["ml", "python"]
-                ],
-            )
-
-            result = collection.get(
-                where={"tags": {"$nin": ["ml", "python"]}},
-                include=["metadatas", "ids"],
-            )
-
-            # Expect 1 row (id2) because its tags have no overlap with the exclusion list
-            assert result is not None
-            assert "ids" in result
-            assert len(result["ids"]) == 1
-            assert "id2" in result["ids"]
-            assert "id1" not in result["ids"]
-            assert result["metadatas"][0].get("tags") == ["java", "cpp"]
-        finally:
-            try:
-                client.delete_collection(name=collection_name)
-            except Exception as cleanup_error:  # pragma: no cover
-                print(f"Warning: cleanup failed for {collection_name}: {cleanup_error}")
-    
-    def test_embedded_collection_get(self):
-        """Test collection.get() with embedded client"""
-        # Check if seekdb package is available
-        try:
-            import pylibseekdb
-        except ImportError:
-            pytest.fail("seekdb embedded package is not installed")
-        
-        # Create embedded client
-        client = pyseekdb.Client(
-            path=SEEKDB_PATH,
-            database=SEEKDB_DATABASE
-        )
-        
-        assert client is not None
-        assert hasattr(client, '_server')
-        assert isinstance(client._server, pyseekdb.SeekdbEmbeddedClient)
-        
-        # Create test collection
-        collection_name = f"test_get_{int(time.time())}"
-        from pyseekdb import HNSWConfiguration
-        config = HNSWConfiguration(dimension=3, distance='l2')
-        # Use a simple 3D embedding function to match the dimension
-        embedding_function = Simple3DEmbeddingFunction()
-        collection = client.create_collection(
-            name=collection_name,
-            configuration=config,
-            embedding_function=embedding_function
-        )
-        
-        try:
-            inserted_ids = self._insert_test_data(client, collection_name)
-            assert len(inserted_ids) > 0, f"Failed to get inserted IDs. Expected at least 1, got {len(inserted_ids)}"
-            if len(inserted_ids) < 5:
-                print(f"   Warning: Expected 5 inserted IDs, but got {len(inserted_ids)}")
-
-            self._test_collection_get(collection, inserted_ids)
+            # Test 14: Get with scalar $nin operator
+            print("✅ Testing get with scalar $nin operator")
+            results = collection.get(where={"tag": {"$nin": ["ml", "python"]}}, limit=10)
+            assert results is not None
+            assert "ids" in results
+            # Should return rows with tag='neural' (excluded 'ml' and 'python')
+            print(f"   Found {len(results['ids'])} results with tag not in ['ml', 'python']")
             
         finally:
             # Cleanup
             try:
-                client.delete_collection(name=collection_name)
+                db_client.delete_collection(name=collection_name)
                 print(f"   Cleaned up collection: {collection_name}")
             except Exception as cleanup_error:
                 print(f"   Warning: Failed to cleanup collection: {cleanup_error}")
-    
-    def test_server_collection_get(self):
-        """Test collection.get() with server client"""
-        # Create server client
-        client = pyseekdb.Client(
-            host=SERVER_HOST,
-            port=SERVER_PORT,
-            tenant="sys",  # Default tenant for seekdb Server
-            database=SERVER_DATABASE,
-            user=SERVER_USER,
-            password=SERVER_PASSWORD
-        )
-        
-        assert client is not None
-        assert hasattr(client, '_server')
-        assert isinstance(client._server, pyseekdb.RemoteServerClient)
-        
-        # Test connection
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result is not None
-        except Exception as e:
-            pytest.fail(f"Server connection failed ({SERVER_HOST}:{SERVER_PORT}): {e}")
-        
-        # Create test collection
-        collection_name = f"test_get_{int(time.time())}"
-        from pyseekdb import HNSWConfiguration
-        config = HNSWConfiguration(dimension=3, distance='l2')
-        # Use a simple 3D embedding function to match the dimension
-        embedding_function = Simple3DEmbeddingFunction()
-        collection = client.create_collection(
-            name=collection_name,
-            configuration=config,
-            embedding_function=embedding_function
-        )
-        
-        try:
-            # Insert test data and get IDs
-            inserted_ids = self._insert_test_data(client, collection_name)
-            assert len(inserted_ids) > 0, f"Failed to get inserted IDs. Expected at least 1, got {len(inserted_ids)}"
-            if len(inserted_ids) < 5:
-                print(f"   Warning: Expected 5 inserted IDs, but got {len(inserted_ids)}")
-
-            self._test_collection_get(collection, inserted_ids)
-            
-        finally:
-            # Cleanup
-            try:
-                client.delete_collection(name=collection_name)
-                print(f"   Cleaned up collection: {collection_name}")
-            except Exception as cleanup_error:
-                print(f"   Warning: Failed to cleanup collection: {cleanup_error}")
-    
-    def test_oceanbase_collection_get(self):
-        """Test collection.get() with OceanBase client"""
-        # Create OceanBase client
-        client = pyseekdb.Client(
-            host=OB_HOST,
-            port=OB_PORT,
-            tenant=OB_TENANT,
-            database=OB_DATABASE,
-            user=OB_USER,
-            password=OB_PASSWORD
-        )
-        
-        assert client is not None
-        assert hasattr(client, '_server')
-        assert isinstance(client._server, pyseekdb.RemoteServerClient)
-        
-        # Test connection
-        try:
-            result = client._server._execute("SELECT 1 as test")
-            assert result is not None
-        except Exception as e:
-            pytest.fail(f"OceanBase connection failed ({OB_HOST}:{OB_PORT}): {e}")
-        
-        # Create test collection
-        collection_name = f"test_get_{int(time.time())}"
-        from pyseekdb import HNSWConfiguration
-        config = HNSWConfiguration(dimension=3, distance='l2')
-        # Use a simple 3D embedding function to match the dimension
-        embedding_function = Simple3DEmbeddingFunction()
-        collection = client.create_collection(
-            name=collection_name,
-            configuration=config,
-            embedding_function=embedding_function
-        )
-        
-        try:
-            # Insert test data and get IDs
-            inserted_ids = self._insert_test_data(client, collection_name)
-            assert len(inserted_ids) > 0, f"Failed to get inserted IDs. Expected at least 1, got {len(inserted_ids)}"
-            if len(inserted_ids) < 5:
-                print(f"   Warning: Expected 5 inserted IDs, but got {len(inserted_ids)}")
-            
-            self._test_collection_get(collection, inserted_ids)
-            
-        finally:
-            # Cleanup
-            try:
-                client.delete_collection(name=collection_name)
-                print(f"   Cleaned up collection: {collection_name}")
-            except Exception as cleanup_error:
-                print(f"   Warning: Failed to cleanup collection: {cleanup_error}")
-            pass
 
 
 if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("pyseekdb - Collection Get Tests")
-    print("="*60)
-    print("\nEnvironment Variable Configuration:")
-    print(f"  Embedded mode: path={SEEKDB_PATH}, database={SEEKDB_DATABASE}")
-    print(f"  Server mode: {SERVER_USER}@{SERVER_HOST}:{SERVER_PORT}/{SERVER_DATABASE}")
-    print(f"  OceanBase mode: {OB_USER}@{OB_TENANT} -> {OB_HOST}:{OB_PORT}/{OB_DATABASE}")
-    print("="*60 + "\n")
-    
     pytest.main([__file__, "-v", "-s"])
-

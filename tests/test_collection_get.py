@@ -135,7 +135,7 @@ class TestCollectionGet:
     def test_embedded_metadata_array_in_overlap(self):
         """
         Regression test for JSON array $in operator with embedded client.
-        Tests that tags=["ml","ai"] matches $in ["ml","python"] via JSON_OVERLAPS.
+        Includes overlap, disjoint, empty list, and complementary $nin expectations.
         """
         try:
             import pylibseekdb  # noqa: F401
@@ -155,21 +155,48 @@ class TestCollectionGet:
 
         try:
             collection.add(
-                ids="id1",
-                documents="",
-                metadatas={"category": "AI", "score": 95, "tags": ["ml", "ai"], "version": 1},
+                ids=["id_overlap", "id_disjoint", "id_missing", "id_null", "id_empty"],
+                documents=["", "", "", "", ""],
+                metadatas=[
+                    {"category": "AI", "tags": ["ml", "ai"]},       # overlaps with ["ml", "python"]
+                    {"category": "Web", "tags": ["java", "cpp"]},   # disjoint
+                    {"category": "Missing"},                       # tags missing
+                    {"category": "Null", "tags": None},            # tags explicit null
+                    {"category": "Empty", "tags": []},             # tags empty array
+                ],
             )
 
+            # $in with overlap
             result = collection.get(
                 where={"tags": {"$in": ["ml", "python"]}},
                 include=["metadatas", "ids"],
             )
+            assert result and "ids" in result
+            assert set(result["ids"]) == {"id_overlap"}
 
-            # Expect 1 row because tags array overlaps with the query list
-            assert result is not None
-            assert "ids" in result
-            assert len(result["ids"]) == 1
-            assert result["metadatas"][0].get("tags") == ["ml", "ai"]
+            # $in with disjoint values -> no hits
+            result = collection.get(
+                where={"tags": {"$in": ["ruby"]}},
+                include=["ids"],
+            )
+            assert result and "ids" in result
+            assert len(result["ids"]) == 0
+
+            # $in with empty list -> should return 0 rows
+            result = collection.get(
+                where={"tags": {"$in": []}},
+                include=["ids"],
+            )
+            assert result and "ids" in result
+            assert len(result["ids"]) == 0
+
+            # $nin should keep disjoint/null/empty, exclude overlap; missing is excluded by JSON behavior
+            result = collection.get(
+                where={"tags": {"$nin": ["ml", "python"]}},
+                include=["ids"],
+            )
+            assert result and "ids" in result
+            assert set(result["ids"]) == {"id_disjoint", "id_null", "id_empty"}
         finally:
             try:
                 client.delete_collection(name=collection_name)
@@ -179,7 +206,7 @@ class TestCollectionGet:
     def test_server_metadata_array_in_overlap(self):
         """
         Regression test for JSON array $in operator with server client.
-        Tests that tags=["ml","ai"] matches $in ["ml","python"] via JSON_OVERLAPS.
+        Includes overlap, disjoint, empty list, and complementary $nin expectations.
         """
         client = pyseekdb.Client(
             host=SERVER_HOST,
@@ -205,21 +232,48 @@ class TestCollectionGet:
 
         try:
             collection.add(
-                ids="id1",
-                documents="",
-                metadatas={"category": "AI", "score": 95, "tags": ["ml", "ai"], "version": 1},
+                ids=["id_overlap", "id_disjoint", "id_missing", "id_null", "id_empty"],
+                documents=["", "", "", "", ""],
+                metadatas=[
+                    {"category": "AI", "tags": ["ml", "ai"]},       # overlaps with ["ml", "python"]
+                    {"category": "Web", "tags": ["java", "cpp"]},   # disjoint
+                    {"category": "Missing"},                       # tags missing
+                    {"category": "Null", "tags": None},            # tags explicit null
+                    {"category": "Empty", "tags": []},             # tags empty array
+                ],
             )
 
+            # $in with overlap
             result = collection.get(
                 where={"tags": {"$in": ["ml", "python"]}},
                 include=["metadatas", "ids"],
             )
+            assert result and "ids" in result
+            assert set(result["ids"]) == {"id_overlap"}
 
-            # Expect 1 row because tags array overlaps with the query list
-            assert result is not None
-            assert "ids" in result
-            assert len(result["ids"]) == 1
-            assert result["metadatas"][0].get("tags") == ["ml", "ai"]
+            # $in with disjoint values -> no hits
+            result = collection.get(
+                where={"tags": {"$in": ["ruby"]}},
+                include=["ids"],
+            )
+            assert result and "ids" in result
+            assert len(result["ids"]) == 0
+
+            # $in with empty list -> should return 0 rows
+            result = collection.get(
+                where={"tags": {"$in": []}},
+                include=["ids"],
+            )
+            assert result and "ids" in result
+            assert len(result["ids"]) == 0
+
+            # $nin should keep disjoint/null/empty, exclude overlap; missing is excluded by JSON behavior
+            result = collection.get(
+                where={"tags": {"$nin": ["ml", "python"]}},
+                include=["ids"],
+            )
+            assert result and "ids" in result
+            assert set(result["ids"]) == {"id_disjoint", "id_null", "id_empty"}
         finally:
             try:
                 client.delete_collection(name=collection_name)
@@ -229,7 +283,7 @@ class TestCollectionGet:
     def test_oceanbase_metadata_array_in_overlap(self):
         """
         Regression test for JSON array $in operator with OceanBase client.
-        Tests that tags=["ml","ai"] matches $in ["ml","python"] via JSON_OVERLAPS.
+        Includes overlap, disjoint, empty list, and complementary $nin expectations.
         """
         client = pyseekdb.Client(
             host=OB_HOST,
@@ -255,21 +309,48 @@ class TestCollectionGet:
 
         try:
             collection.add(
-                ids="id1",
-                documents="",
-                metadatas={"category": "AI", "score": 95, "tags": ["ml", "ai"], "version": 1},
+                ids=["id_overlap", "id_disjoint", "id_missing", "id_null", "id_empty"],
+                documents=["", "", "", "", ""],
+                metadatas=[
+                    {"category": "AI", "tags": ["ml", "ai"]},       # overlaps with ["ml", "python"]
+                    {"category": "Web", "tags": ["java", "cpp"]},   # disjoint
+                    {"category": "Missing"},                       # tags missing
+                    {"category": "Null", "tags": None},            # tags explicit null
+                    {"category": "Empty", "tags": []},             # tags empty array
+                ],
             )
 
+            # $in with overlap
             result = collection.get(
                 where={"tags": {"$in": ["ml", "python"]}},
                 include=["metadatas", "ids"],
             )
+            assert result and "ids" in result
+            assert set(result["ids"]) == {"id_overlap"}
 
-            # Expect 1 row because tags array overlaps with the query list
-            assert result is not None
-            assert "ids" in result
-            assert len(result["ids"]) == 1
-            assert result["metadatas"][0].get("tags") == ["ml", "ai"]
+            # $in with disjoint values -> no hits
+            result = collection.get(
+                where={"tags": {"$in": ["ruby"]}},
+                include=["ids"],
+            )
+            assert result and "ids" in result
+            assert len(result["ids"]) == 0
+
+            # $in with empty list -> should return 0 rows
+            result = collection.get(
+                where={"tags": {"$in": []}},
+                include=["ids"],
+            )
+            assert result and "ids" in result
+            assert len(result["ids"]) == 0
+
+            # $nin should keep disjoint/null/empty, exclude overlap; missing is excluded by JSON behavior
+            result = collection.get(
+                where={"tags": {"$nin": ["ml", "python"]}},
+                include=["ids"],
+            )
+            assert result and "ids" in result
+            assert set(result["ids"]) == {"id_disjoint", "id_null", "id_empty"}
         finally:
             try:
                 client.delete_collection(name=collection_name)

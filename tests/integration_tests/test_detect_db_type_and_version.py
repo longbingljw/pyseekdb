@@ -12,7 +12,7 @@ from pyseekdb.client.version import Version
 class TestDetectDbTypeAndVersion:
     """Tests for detect_db_type_and_version method"""
     
-    def test_detect_seekdb(self, server_client):
+    def test_seekdb_type_detection(self, server_client):
         """Test: detect seekdb Server type and version"""
         # Verify client type
         assert server_client is not None
@@ -33,7 +33,7 @@ class TestDetectDbTypeAndVersion:
         print(f"   Database type: {db_type}")
         print(f"   Version: {version}")
     
-    def test_detect_oceanbase(self, oceanbase_client):
+    def test_ob_type_detection(self, oceanbase_client):
         """Test: detect OceanBase Server type and version"""
         # Verify client type
         assert oceanbase_client is not None

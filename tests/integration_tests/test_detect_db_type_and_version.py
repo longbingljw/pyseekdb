@@ -1,7 +1,6 @@
 """
 Tests for detect_db_type_and_version method
-Tests database type and version detection functionality for server and oceanbase client modes
-Refactored to use client fixtures for parameterized testing
+Tests database type and version detection functionality for server and oceanbase client modes using client fixtures
 """
 import pytest
 
